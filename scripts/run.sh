@@ -4,9 +4,10 @@ echo "PYTHONPATH: ${PYTHONPATH}"
 
 export MASTER_PORT=$((54000 + $RANDOM % 10000))
 export MASTER_ADDR=localhost
+export CUDA_LAUNCH_BLOCKING=1
 
 epoch=3
-batch_size=32
+batch_size=8
 lr=5e-6
 train_emb=True
 train_img_proj=True
@@ -22,15 +23,16 @@ lora_alpha=16
 add_pos_emb=False
 feat_fusion=False
 fuse_with_id=False
-config=""
+config="/home/lcx/chat-scene/Chat-Scene/scripts/"
 max_grad_norm=0.01
 seed=42
 use_location_token=False
 
-llama_model_path="llm/vicuna-7b-v1.5"
+llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsys--vicuna-7b-v1.5"
 
-train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref"
-val_tag="scanqa#scan2cap#sqa3d#multi3dref"
+# train_tag="scanrefer#scan2cap#scanqa#sqa3d#multi3dref#nr3d_caption#obj_align"
+train_tag="scanrefer#multi3dref#nr3d_caption#obj_align"
+val_tag="scanrefer#multi3dref"
 
 evaluate=False
 debug=False
@@ -48,14 +50,14 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-pretrained_path=""
+pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 
 OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
 mkdir -p ${OUTPUT_DIR}
 
-srun --partition=mozi-S1 --gres=gpu:${gpu_num} --ntasks-per-node=${gpu_num} --kill-on-bad-exit --quotatype=reserved \
+# srun --partition=mozi-S1 --gres=gpu:${gpu_num} --ntasks-per-node=${gpu_num} --kill-on-bad-exit --quotatype=reserved \
 python tasks/train.py \
-    "$(dirname $0)/${config}config.py" \
+    "${config}config.py" \
     output_dir "$OUTPUT_DIR" \
     scheduler.epochs "$epoch" \
     optimizer.lr "$lr" \
