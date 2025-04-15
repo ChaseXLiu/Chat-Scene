@@ -1,5 +1,5 @@
 # ========================= data ==========================
-anno_root = "annotations"  # annotation dir
+anno_root = "/home/lcx/chat-scene/Chat-Scene/annotations"  # annotation dir
 pc_encoder = "uni3d"
 segmentor = "mask3d"
 version = ""
@@ -16,8 +16,8 @@ seg_train_attr_file = f"{anno_root}/scannet_{segmentor}_train_attributes.pt"
 seg_val_attr_file = f"{anno_root}/scannet_{segmentor}_val_attributes.pt"
 seg_all_attr_file = f"{anno_root}/scannet_{segmentor}_all_attributes.pt"
 
-train_tag = 'scanqa'
-val_tag = 'scanqa'
+train_tag = 'scanrefer#multi3dref#nr3d'
+val_tag = 'scanrefer#multi3dref#nr3d'
 
 train_file_dict = {
     'scanrefer': [
@@ -249,7 +249,15 @@ model = dict(
     feat_fusion=False,
     fuse_with_id=False,
     use_objid=True,
-    use_location_token=False
+    use_location_token=False,
+    use_multi_scale=True,  # 是否启用多尺度表示
+    num_scales=3,  # L: 3D视觉尺度层级数
+    use_token_groups=True,
+    use_text_multi_scale=True,  # 是否使用多尺度文本表示
+    use_feature_consistency=True,  # 特征一致性损失
+    feature_consistency_weight=0.1,
+    use_spatial_attention=True,  # 空间关系注意力 
+    spatial_attention_weight=0.1
 )
 
 lora = dict(
@@ -290,7 +298,7 @@ evaluate = False
 # ========================= wandb ==========================
 wandb = dict(
     enable=False,
-    entity="huanghaifeng",  # username or team name to store the runs, see https://docs.wandb.ai/ref/python/init
+    entity="liuchenxu",  # username or team name to store the runs, see https://docs.wandb.ai/ref/python/init
     project="Scene-LLM",
 )
 dist_url = "env://"
@@ -311,4 +319,4 @@ pretrained_path = ""
 img_projector_path = ""
 
 debug=False
-gpu_num=1
+gpu_num=2

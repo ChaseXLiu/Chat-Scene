@@ -92,7 +92,7 @@ def train(
     train_loader = MetaLoader(name2loader=dict(list(zip(media_types, train_loaders))))
 
     accum_iter = 1
-    eval_freq = 2000  # len(train_loader)
+    eval_freq = len(train_loader)
 
     optimizer.zero_grad()
     iterator = metric_logger.log_every(train_loader, log_freq, header)
@@ -191,7 +191,8 @@ def evaluate_all(
         logger.info(f"{k}: {v}")
     
     model.train()
-    model.module.llama_model.config.use_cache = False
+    # model.module.llama_model.config.use_cache = False
+    model_without_ddp.llama_model.config.use_cache = False
     return val_scores
 
 
@@ -258,7 +259,7 @@ def evaluate(
                   "w") as f:
             json.dump(save_preds, f, indent=4)
 
-    dist.barrier()
+    # dist.barrier()
     if is_main_process():
         save_preds = []
         for rank in range(config.gpu_num):
@@ -360,6 +361,16 @@ def setup_dataloaders(config):
 
 
 def main(config):
+    """3D场景对话模型的主训练流程    
+    核心功能:
+        1. 初始化训练环境
+        2. 数据加载器准备
+        3. 模型构建与优化器设置
+        4. 训练/评估主循环
+        5. 结果保存与日志记录    
+    参数:
+        config: 包含所有配置参数的Config对象
+    """
     if is_main_process() and config.wandb.enable:
         run = setup_wandb(config)
 
@@ -436,7 +447,7 @@ def main(config):
 
             if global_step > max_global_step:
                 break
-            dist.barrier()
+            # dist.barrier()
 
     if config.evaluate:
         evaluate_all(model, model_without_ddp, val_loaders, start_epoch - 1, global_step, device, config)
