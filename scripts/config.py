@@ -284,10 +284,10 @@ optimizer = dict(
     max_grad_norm=5,  # requires a positive float, use -1 to disable
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(
-        enable=False,
-        module_names=["model.embed_tokens"],
-        lr=[5e-4],
-        wd=[0.02]
+        enable=True,
+        module_names=["model.embed_tokens", "token_group_weights"],
+        lr=[5e-4,  2.5e-2],
+        wd=[0.02, 0.01]
     ),
 )
 

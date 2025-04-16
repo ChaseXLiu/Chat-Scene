@@ -34,6 +34,7 @@ llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsy
 train_tag="scanrefer#multi3dref#nr3d_caption#obj_align"
 val_tag="scanrefer#multi3dref"
 
+# evaluate=True
 evaluate=False
 debug=False
 if [ $debug = "True" ]; then

@@ -17,6 +17,8 @@ from torch.nn.utils.rnn import pad_sequence
 import contextlib
 from dataset.base_dataset import update_caption, recover_caption
 
+# import visualize_features
+
 logger = logging.getLogger(__name__)
 
 torch.autograd.set_detect_anomaly(True)
@@ -75,7 +77,8 @@ class Chat3D(nn.Module):
         self.use_multi_scale = config.model.use_multi_scale
         self.num_scales = config.model.num_scales
         self.token_groups = ['semantic', 'geometry', 'texture']
-        self.token_group_weights = nn.Parameter(torch.ones(len(self.token_groups)) / len(self.token_groups))
+        initial_weights = torch.tensor([0.5, 0.3, 0.2])  # 语义、几何、纹理的初始权重
+        self.token_group_weights = nn.Parameter(initial_weights)
         self.use_token_groups = config.model.use_token_groups
 
         # 文本多尺度处理配置
@@ -198,7 +201,7 @@ class Chat3D(nn.Module):
 
         # 为多尺度表示创建投影层
         # 添加可学习的多尺度权重
-        self.multiscale_weights = nn.Parameter(torch.ones(self.num_scales) / self.num_scales)            
+        self.multiscale_weights = nn.Parameter(torch.ones(self.num_scales) / self.num_scales)
         # 添加多尺度融合层
         self.multi_scale_fusion = nn.Sequential(
             nn.Linear(self.llama_dim, self.llama_dim),
@@ -224,12 +227,13 @@ class Chat3D(nn.Module):
             nn.Linear(self.llama_dim, self.llama_dim)
         )            
         # 添加注意力机制，使投影层能够动态选择重要特征
-        self.feature_attention = nn.Sequential(
-            nn.Linear(self.input_dim, 128),  # 降维
-            nn.GELU(),
-            nn.Linear(128, self.num_scales),
-            nn.Softmax(dim=-1)
-        )
+        # self.feature_attention = nn.Sequential(
+        #     nn.Linear(self.input_dim, 128),  # 降维
+        #     nn.GELU(),
+        #     nn.Linear(128, self.num_scales),
+        #     nn.Softmax(dim=-1)
+        # )
+        self.feature_attention = None
         # 多尺度交叉注意力层
         self.cross_attentions = nn.ModuleList([
             nn.MultiheadAttention(embed_dim=self.llama_dim, 
@@ -334,34 +338,35 @@ class Chat3D(nn.Module):
             embeds = (1 - indices) * embeds.detach() + indices * embeds
         else:
             embeds = embeds.detach()
-        if not multi_scale:
-            return embeds
+        return embeds
+        # if not multi_scale:
+        #     return embeds
         
-        """=============== 此处的处理逻辑待修改/ ==============="""
-        # 多尺度处理
-        base_embed = embeds.squeeze(0)
-        multi_scale_embeds = []
-        # 粗粒度表示 (原始embedding)
-        multi_scale_embeds.append(base_embed)
-        # 细粒度表示 (自注意力增强)
-        if base_embed.dim() == 2:  # [seq_len, hidden_dim]
-            with torch.no_grad():
-                attn_weights = torch.matmul(base_embed, base_embed.transpose(0,1)) / (self.llama_dim**0.5)
-                fine_embed = torch.matmul(F.softmax(attn_weights, dim=-1), base_embed)
-            multi_scale_embeds.append(fine_embed)
-        # 详细表示 (位置加权)
-        seq_len = base_embed.shape[0]
-        with torch.no_grad():
-            pos_weights = 1.0 - 0.8 * torch.abs(
-                torch.arange(seq_len, device=device) - seq_len/2) / (seq_len/2)
-            detailed_embed = base_embed * pos_weights.unsqueeze(-1)
-        multi_scale_embeds.append(detailed_embed)
-        # 应用可学习权重
-        # if hasattr(self, 'text_scale_weights'):
-        #     return [w * feat for w, feat in zip(self.text_scale_weights, multi_scale_embeds)]
-        """=============== /此处的处理逻辑待修改 ==============="""
+        # """=============== 此处的处理逻辑待修改/ ==============="""
+        # # 多尺度处理
+        # base_embed = embeds.squeeze(0)
+        # multi_scale_embeds = []
+        # # 粗粒度表示 (原始embedding)
+        # multi_scale_embeds.append(base_embed)
+        # # 细粒度表示 (自注意力增强)
+        # if base_embed.dim() == 2:  # [seq_len, hidden_dim]
+        #     with torch.no_grad():
+        #         attn_weights = torch.matmul(base_embed, base_embed.transpose(0,1)) / (self.llama_dim**0.5)
+        #         fine_embed = torch.matmul(F.softmax(attn_weights, dim=-1), base_embed)
+        #     multi_scale_embeds.append(fine_embed)
+        # # 详细表示 (位置加权)
+        # seq_len = base_embed.shape[0]
+        # with torch.no_grad():
+        #     pos_weights = 1.0 - 0.8 * torch.abs(
+        #         torch.arange(seq_len, device=device) - seq_len/2) / (seq_len/2)
+        #     detailed_embed = base_embed * pos_weights.unsqueeze(-1)
+        # multi_scale_embeds.append(detailed_embed)
+        # # 应用可学习权重
+        # # if hasattr(self, 'text_scale_weights'):
+        # #     return [w * feat for w, feat in zip(self.text_scale_weights, multi_scale_embeds)]
+        # """=============== /此处的处理逻辑待修改 ==============="""
 
-        return multi_scale_embeds
+        # return multi_scale_embeds
 
     def encode_object_feat(self, feat, img_feat, locs):
         """
@@ -375,11 +380,6 @@ class Chat3D(nn.Module):
 
         # 创建多尺度特征表示
         multi_scale_feats = []
-
-        # 使用特征注意力机制动态选择重要特征
-        attention_weights = None
-        if self.feature_attention:
-            attention_weights = self.feature_attention(feat)
         
         # 第一个尺度：全局语义 P(V-T)
         semantic_feat = self.semantic_proj(feat)
@@ -392,28 +392,19 @@ class Chat3D(nn.Module):
         # 第三个尺度：细粒度纹理
         texture_feat = self.texture_proj(feat)
         multi_scale_feats.append(texture_feat)
+
+        # 确保权重数量与特征数量匹配
+        weights = self.token_group_weights[:len(multi_scale_feats)]
+        # 归一化权重
+        norm_weights = F.softmax(weights, dim=0)            
+        # 融合多尺度特征
+        fused_feat = torch.zeros_like(multi_scale_feats[0])
+        for i, scale_feat in enumerate(multi_scale_feats):
+            fused_feat += norm_weights[i] * scale_feat                
+        # 返回融合后的特征和原始多尺度特征列表
+        proj_object_embed = fused_feat
         
-        # 如果使用特征注意力，应用权重
-        if attention_weights is not None:
-            for i in range(len(multi_scale_feats)):
-                # 更健壮的处理方式：首先确保我们能获取到正确的注意力权重
-                if len(attention_weights.shape) == 2:  # [B, num_scales]
-                    if i < attention_weights.shape[1]:
-                        # 获取第i个尺度的权重
-                        weight = attention_weights[:, i:i+1]
-                        # 扩展为与特征兼容的形状
-                        scale_attention = weight.unsqueeze(-1).expand(-1, multi_scale_feats[i].size(1), 1)
-                        multi_scale_feats[i] = multi_scale_feats[i] * scale_attention
-                elif len(attention_weights.shape) == 3:  # [B, N, num_scales]
-                    if i < attention_weights.shape[2]:
-                        # 获取第i个尺度的权重
-                        weight = attention_weights[:, :, i:i+1]
-                        multi_scale_feats[i] = multi_scale_feats[i] * weight
-                else:
-                    # 如果形状不符合预期，使用平均权重
-                    print(f"Warning: Unexpected attention weights shape: {attention_weights.shape}")
-        
-        return multi_scale_feats, feat, img_feat, attention_weights
+        return proj_object_embed, feat, img_feat
 
         # 原始单尺度处理
         # return feat, img_feat
@@ -575,45 +566,45 @@ class Chat3D(nn.Module):
         selected_objid_embeds = objid_embeds[valid_ids]
 
         # 处理多尺度表示，并构建分层码书
-        if self.use_multi_scale:
-            # 构建多尺度分层码书
-            multi_scale_embeds = []            
-            # 为每个尺度创建标记组
-            for scale_idx in range(self.num_scales):
-                # 基础层：对象ID嵌入 (基础属性：3D坐标、颜色)
-                scale_embed = selected_objid_embeds.clone()
-                # 添加对应尺度的特征 (多层次标记组：全局语义+局部几何+细粒度纹理)
-                if not self.no_obj:
-                    # 确保embed_obj[scale_idx]的维度与scale_embed匹配
-                    if isinstance(embed_obj, list):
-                        # 如果是多尺度特征列表，确保每个尺度的特征维度匹配
-                        if embed_obj[scale_idx].size(-1) != scale_embed.size(-1):
-                            # 使用投影层调整维度
-                            proj = nn.Linear(embed_obj[scale_idx].size(-1), scale_embed.size(-1)).to(scale_embed.device)
-                            adjusted_embed = proj(embed_obj[scale_idx][assigned_ids])
-                        else:
-                            adjusted_embed = embed_obj[scale_idx][assigned_ids]
-                    else:
-                        # 如果是单尺度特征，直接使用
-                        adjusted_embed = embed_obj[assigned_ids]
-                    scale_embed += adjusted_embed
-                # 添加图像特征（根据尺度调整权重）
-                if self.add_img_token:
-                    img_weight = 0.7 if scale_idx == 0 else 0.3  # 语义层更依赖图像
-                    scale_embed += embed_img[assigned_ids] * img_weight                    
-                multi_scale_embeds.append(scale_embed)
-            # 创建最终的分层码书
-            # 每个对象在码书中占用num_scales个位置，每个位置对应一个尺度
-            object_list_embed = torch.zeros(
-                (selected_objid_embeds.shape[0] * self.num_scales, selected_objid_embeds.shape[1]),
-                dtype=selected_objid_embeds.dtype,
-                device=selected_objid_embeds.device
-            )
-            # 交错排列不同尺度的特征
-            for scale_idx in range(self.num_scales):
-                object_list_embed[scale_idx::self.num_scales, :] = multi_scale_embeds[scale_idx]
-            # print("Multi-scale embedding created.")
-            return object_list_embed
+        # if self.use_multi_scale:
+        #     # 构建多尺度分层码书
+        #     multi_scale_embeds = []            
+        #     # 为每个尺度创建标记组
+        #     for scale_idx in range(self.num_scales):
+        #         # 基础层：对象ID嵌入 (基础属性：3D坐标、颜色)
+        #         scale_embed = selected_objid_embeds.clone()
+        #         # 添加对应尺度的特征 (多层次标记组：全局语义+局部几何+细粒度纹理)
+        #         if not self.no_obj:
+        #             # 确保embed_obj[scale_idx]的维度与scale_embed匹配
+        #             if isinstance(embed_obj, list):
+        #                 # 如果是多尺度特征列表，确保每个尺度的特征维度匹配
+        #                 if embed_obj[scale_idx].size(-1) != scale_embed.size(-1):
+        #                     # 使用投影层调整维度
+        #                     proj = nn.Linear(embed_obj[scale_idx].size(-1), scale_embed.size(-1)).to(scale_embed.device)
+        #                     adjusted_embed = proj(embed_obj[scale_idx][assigned_ids])
+        #                 else:
+        #                     adjusted_embed = embed_obj[scale_idx][assigned_ids]
+        #             else:
+        #                 # 如果是单尺度特征，直接使用
+        #                 adjusted_embed = embed_obj[assigned_ids]
+        #             scale_embed += adjusted_embed
+        #         # 添加图像特征（根据尺度调整权重）
+        #         if self.add_img_token:
+        #             img_weight = 0.7 if scale_idx == 0 else 0.3  # 语义层更依赖图像
+        #             scale_embed += embed_img[assigned_ids] * img_weight                    
+        #         multi_scale_embeds.append(scale_embed)
+        #     # 创建最终的分层码书
+        #     # 每个对象在码书中占用num_scales个位置，每个位置对应一个尺度
+        #     object_list_embed = torch.zeros(
+        #         (selected_objid_embeds.shape[0] * self.num_scales, selected_objid_embeds.shape[1]),
+        #         dtype=selected_objid_embeds.dtype,
+        #         device=selected_objid_embeds.device
+        #     )
+        #     # 交错排列不同尺度的特征
+        #     for scale_idx in range(self.num_scales):
+        #         object_list_embed[scale_idx::self.num_scales, :] = multi_scale_embeds[scale_idx]
+        #     # print("Multi-scale embedding created.")
+        #     return object_list_embed
 
         if self.use_location_token:
             object_list_embed = torch.zeros((selected_objid_embeds.shape[0] * 2, selected_objid_embeds.shape[1]), dtype=selected_objid_embeds.dtype, device=selected_objid_embeds.device)
@@ -710,7 +701,7 @@ class Chat3D(nn.Module):
             包含各项损失的字典
         """       
         # 获取对象嵌入
-        proj_multi_scale_object_embeds, object_embed, object_img_embed, attention_weights = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
+        proj_object_embed, object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
         device = object_embed.device
         batch_size = object_embed.shape[0]
         proj_object_img_embed = self.object_img_proj(object_img_embed)
@@ -720,55 +711,8 @@ class Chat3D(nn.Module):
             mins, maxs = self.get_min_max_coord(scene_locs[:, :, :3], scene_mask)
             pos_embed = self.pos_embedding(scene_locs[:, :, :3], input_range=[mins, maxs]) / 10
             proj_pos_embed = self.pos_proj(pos_embed)
-            # 为每个尺度添加位置嵌入
-            for scale_idx in range(self.num_scales):
-                proj_multi_scale_object_embeds[scale_idx] = proj_multi_scale_object_embeds[scale_idx] + proj_pos_embed
+            proj_object_embed = proj_object_embed + proj_pos_embed
             proj_object_img_embed = proj_object_img_embed + proj_pos_embed
-            
-         # 应用注意力权重
-        for scale_idx in range(self.num_scales):
-            if len(attention_weights.shape) == 4:  # [B, 1, 3, 1] 或类似形状
-                # 首先将4维张量转换为3维
-                # 根据实际形状选择正确的维度进行压缩
-                if attention_weights.shape[1] == 1 and attention_weights.shape[2] == self.num_scales:
-                    # 形状为 [B, 1, num_scales, 1]
-                    scale_attention = attention_weights[:, :, scale_idx, :]  # [B, 1, 1]
-                else:
-                    # 其他4维形状，尝试适配
-                    scale_attention = attention_weights[:, :, scale_idx, :].squeeze(1)  # [B, 1, 1]                            
-                # 确保scale_attention是3维的
-                if len(scale_attention.shape) == 4:
-                    scale_attention = scale_attention.view(scale_attention.shape[0], scale_attention.shape[1], -1)
-                # 然后扩展到正确的形状
-                scale_attention = scale_attention.expand(-1, proj_multi_scale_object_embeds[scale_idx].size(1), -1)  # [B, N, 1]
-            else:  # 2维或3维情况
-                if attention_weights.shape[-1] == self.num_scales:
-                    # 如果最后一维是尺度维度
-                    scale_attention = attention_weights[:, :, scale_idx].unsqueeze(-1)  # [B, 100, 1]
-                else:
-                    # 其他情况，尝试从第二维提取
-                    scale_attention = attention_weights[:, scale_idx:scale_idx+1].unsqueeze(-1)  # [B, 1, 1]
-                # 确保形状正确
-                if scale_attention.shape[1] != proj_multi_scale_object_embeds[scale_idx].size(1):
-                    # 如果第二维不匹配，需要扩展
-                    scale_attention = scale_attention[:, 0:1, :].expand(-1, proj_multi_scale_object_embeds[scale_idx].size(1), -1)
-            proj_multi_scale_object_embeds[scale_idx] = proj_multi_scale_object_embeds[scale_idx] * scale_attention
-        
-        # 使用可学习权重融合多尺度特征
-        if self.multiscale_weights is not None and len(self.multiscale_weights) > 0:
-            # 一次性计算所有尺度的加权和
-            weights = [w.detach() for w in self.multiscale_weights]
-            weighted_embeds = [weights[i] * proj_multi_scale_object_embeds[i] for i in range(self.num_scales)]
-            fused_object_embed = torch.sum(torch.stack(weighted_embeds), dim=0)             
-            # 通过融合层进一步处理
-            if self.multi_scale_fusion is not None:
-                fused_object_embed = self.multi_scale_fusion(fused_object_embed)                
-            # 定义proj_object_embed为融合后的特征
-            proj_object_embed = fused_object_embed
-            # print("use fused weights")
-        else:
-            # 如果没有定义权重，使用第一个尺度的特征
-            proj_object_embed = proj_multi_scale_object_embeds[0]
 
         proj_scene_embed = None
         if self.add_scene_token:  # remember to change the evaluate 
@@ -782,6 +726,51 @@ class Chat3D(nn.Module):
             scene_embed = self.relation_module(scene_embed, src_key_padding_mask=~scene_mask)
             proj_scene_embed = self.scene_proj(scene_embed)
             
+         # 应用注意力权重
+        # for scale_idx in range(self.num_scales):
+        #     if len(attention_weights.shape) == 4:  # [B, 1, 3, 1] 或类似形状
+        #         # 首先将4维张量转换为3维
+        #         # 根据实际形状选择正确的维度进行压缩
+        #         if attention_weights.shape[1] == 1 and attention_weights.shape[2] == self.num_scales:
+        #             # 形状为 [B, 1, num_scales, 1]
+        #             scale_attention = attention_weights[:, :, scale_idx, :]  # [B, 1, 1]
+        #         else:
+        #             # 其他4维形状，尝试适配
+        #             scale_attention = attention_weights[:, :, scale_idx, :].squeeze(1)  # [B, 1, 1]                            
+        #         # 确保scale_attention是3维的
+        #         if len(scale_attention.shape) == 4:
+        #             scale_attention = scale_attention.view(scale_attention.shape[0], scale_attention.shape[1], -1)
+        #         # 然后扩展到正确的形状
+        #         scale_attention = scale_attention.expand(-1, proj_multi_scale_object_embeds[scale_idx].size(1), -1)  # [B, N, 1]
+        #     else:  # 2维或3维情况
+        #         if attention_weights.shape[-1] == self.num_scales:
+        #             # 如果最后一维是尺度维度
+        #             scale_attention = attention_weights[:, :, scale_idx].unsqueeze(-1)  # [B, 100, 1]
+        #         else:
+        #             # 其他情况，尝试从第二维提取
+        #             scale_attention = attention_weights[:, scale_idx:scale_idx+1].unsqueeze(-1)  # [B, 1, 1]
+        #         # 确保形状正确
+        #         if scale_attention.shape[1] != proj_multi_scale_object_embeds[scale_idx].size(1):
+        #             # 如果第二维不匹配，需要扩展
+        #             scale_attention = scale_attention[:, 0:1, :].expand(-1, proj_multi_scale_object_embeds[scale_idx].size(1), -1)
+        #     proj_multi_scale_object_embeds[scale_idx] = proj_multi_scale_object_embeds[scale_idx] * scale_attention
+        
+        # 使用可学习权重融合多尺度特征
+        # if self.multiscale_weights is not None and len(self.multiscale_weights) > 0:
+        #     # 一次性计算所有尺度的加权和
+        #     weights = [w.detach() for w in self.multiscale_weights]
+        #     weighted_embeds = [weights[i] * proj_multi_scale_object_embeds[i] for i in range(self.num_scales)]
+        #     fused_object_embed = torch.sum(torch.stack(weighted_embeds), dim=0)             
+        #     # 通过融合层进一步处理
+        #     if self.multi_scale_fusion is not None:
+        #         fused_object_embed = self.multi_scale_fusion(fused_object_embed)                
+        #     # 定义proj_object_embed为融合后的特征
+        #     proj_object_embed = fused_object_embed
+        #     # print("use fused weights")
+        # else:
+        #     # 如果没有定义权重，使用第一个尺度的特征
+        #     proj_object_embed = proj_multi_scale_object_embeds[0]
+
         input_embed_list, attn_list, target_list = [], [], []
         max_seq_len = 0
         p_0_embed = self.p_0_embed.to(device)
@@ -792,54 +781,54 @@ class Chat3D(nn.Module):
             # 构建文本提示
             prompt = f"{question} {self.role[1]}: "
             # 使用多尺度文本处理
-            prompt_embeds = self.get_text_emb(prompt, device=device, multi_scale=True)
-            all_fused_text_embeds = []
-            fused_obj_feats = []
-            # 交叉注意力处理
-            for scale_idx in range(self.num_scales):
-                # 获取当前尺度的3D和文本特征
-                object_feat = proj_multi_scale_object_embeds[scale_idx][i].unsqueeze(0)  # [1, N, dim]
-                text_feat = prompt_embeds[scale_idx].unsqueeze(0)  # [1, L, dim]
+            prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)
+            # all_fused_text_embeds = []
+            # fused_obj_feats = []
+            # # 交叉注意力处理
+            # for scale_idx in range(self.num_scales):
+            #     # 获取当前尺度的3D和文本特征
+            #     object_feat = proj_multi_scale_object_embeds[scale_idx][i].unsqueeze(0)  # [1, N, dim]
+            #     text_feat = prompt_embeds[scale_idx].unsqueeze(0)  # [1, L, dim]
                 
-                # 双向交叉注意力
-                with torch.no_grad():
-                    obj_attended, _ = self.cross_attentions[scale_idx](
-                        query=object_feat,
-                        key=text_feat,
-                        value=text_feat,
-                        need_weights=False
-                    )
-                    text_attended, _ = self.cross_attentions[scale_idx](
-                        query=text_feat,
-                        key=object_feat,
-                        value=object_feat,
-                        need_weights=False
-                    )
-                    # 特征融合
-                    fused_obj_feat = self.fusion_proj[scale_idx](
-                        torch.cat([object_feat, obj_attended], dim=-1)
-                    )
-                    fused_text_feat = self.fusion_proj[scale_idx](
-                        torch.cat([text_feat, text_attended], dim=-1)
-                    )
-                fused_obj_feats.append(fused_obj_feat.squeeze(0))
-                all_fused_text_embeds.append(fused_text_feat.squeeze(0))
+            #     # 双向交叉注意力
+            #     with torch.no_grad():
+            #         obj_attended, _ = self.cross_attentions[scale_idx](
+            #             query=object_feat,
+            #             key=text_feat,
+            #             value=text_feat,
+            #             need_weights=False
+            #         )
+            #         text_attended, _ = self.cross_attentions[scale_idx](
+            #             query=text_feat,
+            #             key=object_feat,
+            #             value=object_feat,
+            #             need_weights=False
+            #         )
+            #         # 特征融合
+            #         fused_obj_feat = self.fusion_proj[scale_idx](
+            #             torch.cat([object_feat, obj_attended], dim=-1)
+            #         )
+            #         fused_text_feat = self.fusion_proj[scale_idx](
+            #             torch.cat([text_feat, text_attended], dim=-1)
+            #         )
+            #     fused_obj_feats.append(fused_obj_feat.squeeze(0))
+            #     all_fused_text_embeds.append(fused_text_feat.squeeze(0))
 
             # 统一更新所有尺度的特征
-            for scale_idx in range(self.num_scales):
-                new_embed = fused_obj_feats[scale_idx]
-                proj_multi_scale_object_embeds[scale_idx][i] = new_embed
+            # for scale_idx in range(self.num_scales):
+            #     new_embed = fused_obj_feats[scale_idx]
+            #     proj_multi_scale_object_embeds[scale_idx][i] = new_embed
 
-            # 权重处理
-            scale_weights = getattr(self, 'adjusted_weights', self.text_scale_weights)
-            # 确保权重数量与尺度数量匹配
-            scale_weights = scale_weights[:self.num_scales]
-            # 归一化权重
-            norm_weights = F.softmax(scale_weights, dim=0)
-            # 融合多尺度文本表示
-            fused_prompt_embed = torch.zeros_like(all_fused_text_embeds[0])
-            for weight, embed in zip(norm_weights, all_fused_text_embeds):
-                fused_prompt_embed = fused_prompt_embed + (weight * embed)
+            # # 权重处理
+            # scale_weights = getattr(self, 'adjusted_weights', self.text_scale_weights)
+            # # 确保权重数量与尺度数量匹配
+            # scale_weights = scale_weights[:self.num_scales]
+            # # 归一化权重
+            # norm_weights = F.softmax(scale_weights, dim=0)
+            # # 融合多尺度文本表示
+            # fused_prompt_embed = torch.zeros_like(all_fused_text_embeds[0])
+            # for weight, embed in zip(norm_weights, all_fused_text_embeds):
+            #     fused_prompt_embed = fused_prompt_embed + (weight * embed)
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
@@ -856,7 +845,7 @@ class Chat3D(nn.Module):
                 p_0_embed, 
                 object_list_embed, 
                 p_1_embed, 
-                fused_prompt_embed
+                prompt_embed
                 ], dim=0)
             wrapped_attn = torch.ones(wrapped_embed.size()[:-1], dtype=torch.long).to(wrapped_embed.device)
             empty_target = (
@@ -1000,8 +989,7 @@ class Chat3D(nn.Module):
         返回:
             生成的回答文本列表 [bs]
         """
-
-        proj_multi_scale_object_embeds, object_embed, object_img_embed, attention_weights = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
+        proj_object_embed, object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
         device = object_embed.device
         batch_size, obj_num = object_embed.shape[:2]
         proj_object_img_embed = self.object_img_proj(object_img_embed)
@@ -1012,58 +1000,10 @@ class Chat3D(nn.Module):
             pos_embed = self.pos_embedding(scene_locs[:, :, :3], input_range=[mins, maxs]) / 10
             proj_pos_embed = self.pos_proj(pos_embed)
             # 为每个尺度添加位置嵌入
-            for scale_idx in range(self.num_scales):
-                proj_multi_scale_object_embeds[scale_idx] = proj_multi_scale_object_embeds[scale_idx] + proj_pos_embed
+            proj_object_embed = proj_object_embed + proj_pos_embed
             proj_object_img_embed = proj_object_img_embed + proj_pos_embed
-            
-         # 应用注意力权重
-        for scale_idx in range(self.num_scales):
-            if len(attention_weights.shape) == 4:  # [B, 1, 3, 1] 或类似形状
-                # 首先将4维张量转换为3维
-                # 根据实际形状选择正确的维度进行压缩
-                if attention_weights.shape[1] == 1 and attention_weights.shape[2] == self.num_scales:
-                    # 形状为 [B, 1, num_scales, 1]
-                    scale_attention = attention_weights[:, :, scale_idx, :]  # [B, 1, 1]
-                else:
-                    # 其他4维形状，尝试适配
-                    scale_attention = attention_weights[:, :, scale_idx, :].squeeze(1)  # [B, 1, 1]                            
-                # 确保scale_attention是3维的
-                if len(scale_attention.shape) == 4:
-                    scale_attention = scale_attention.view(scale_attention.shape[0], scale_attention.shape[1], -1)
-                # 然后扩展到正确的形状
-                scale_attention = scale_attention.expand(-1, proj_multi_scale_object_embeds[scale_idx].size(1), -1)  # [B, N, 1]
-            else:  # 2维或3维情况
-                if attention_weights.shape[-1] == self.num_scales:
-                    # 如果最后一维是尺度维度
-                    scale_attention = attention_weights[:, :, scale_idx].unsqueeze(-1)  # [B, 100, 1]
-                else:
-                    # 其他情况，尝试从第二维提取
-                    scale_attention = attention_weights[:, scale_idx:scale_idx+1].unsqueeze(-1)  # [B, 1, 1]
-                # 确保形状正确
-                if scale_attention.shape[1] != proj_multi_scale_object_embeds[scale_idx].size(1):
-                    # 如果第二维不匹配，需要扩展
-                    scale_attention = scale_attention[:, 0:1, :].expand(-1, proj_multi_scale_object_embeds[scale_idx].size(1), -1)
-            proj_multi_scale_object_embeds[scale_idx] = proj_multi_scale_object_embeds[scale_idx] * scale_attention
-        
-        # 使用可学习权重融合多尺度特征
-        if self.multiscale_weights is not None and len(self.multiscale_weights) > 0:
-            # 一次性计算所有尺度的加权和
-            weights = [w.detach() for w in self.multiscale_weights]
-            weighted_embeds = [weights[i] * proj_multi_scale_object_embeds[i] for i in range(self.num_scales)]
-            fused_object_embed = torch.sum(torch.stack(weighted_embeds), dim=0)             
-            # 通过融合层进一步处理
-            if self.multi_scale_fusion is not None:
-                fused_object_embed = self.multi_scale_fusion(fused_object_embed)                
-            # 定义proj_object_embed为融合后的特征
-            proj_object_embed = fused_object_embed
-            # print("use fused weights")
-        else:
-            # 如果没有定义权重，使用第一个尺度的特征
-            proj_object_embed = proj_multi_scale_object_embeds[0]
 
-        # 初始化场景嵌入为None
-        proj_scene_embed = None
-        if self.add_scene_token:  # remember to change the evaluate 
+        if self.add_scene_token:
             # if self.add_img_token:
             #     object_embed = object_embed + object_img_embed
             obj_embed = self.scene_init_proj(object_embed)
@@ -1073,6 +1013,22 @@ class Chat3D(nn.Module):
             scene_embed = obj_embed + pos_embed
             scene_embed = self.relation_module(scene_embed, src_key_padding_mask=~scene_mask)
             proj_scene_embed = self.scene_proj(scene_embed)
+        
+        # 使用可学习权重融合多尺度特征
+        # if self.multiscale_weights is not None and len(self.multiscale_weights) > 0:
+        #     # 一次性计算所有尺度的加权和
+        #     weights = [w.detach() for w in self.multiscale_weights]
+        #     weighted_embeds = [weights[i] * proj_multi_scale_object_embeds[i] for i in range(self.num_scales)]
+        #     fused_object_embed = torch.sum(torch.stack(weighted_embeds), dim=0)             
+        #     # 通过融合层进一步处理
+        #     if self.multi_scale_fusion is not None:
+        #         fused_object_embed = self.multi_scale_fusion(fused_object_embed)                
+        #     # 定义proj_object_embed为融合后的特征
+        #     proj_object_embed = fused_object_embed
+        #     # print("use fused weights")
+        # else:
+        #     # 如果没有定义权重，使用第一个尺度的特征
+        #     proj_object_embed = proj_multi_scale_object_embeds[0]
 
         output_texts = []
         p_0_embed = self.p_0_embed.to(device).unsqueeze(0)
@@ -1084,55 +1040,7 @@ class Chat3D(nn.Module):
             # 构建文本提示
             tmp_prompt = f" {custom_prompt[i]} {self.role[1]}: "
             tmp_prompt = update_caption(tmp_prompt, assigned_ids[i])
-            # 使用多尺度文本处理
-            prompt_embeds = self.get_text_emb(tmp_prompt, device=device, multi_scale=True)
-            all_fused_text_embeds = []
-            fused_obj_feats = []
-            # 交叉注意力处理
-            for scale_idx in range(self.num_scales):
-                # 获取当前尺度的3D和文本特征
-                object_feat = proj_multi_scale_object_embeds[scale_idx][i].unsqueeze(0)  # [1, N, dim]
-                text_feat = prompt_embeds[scale_idx].unsqueeze(0)  # [1, L, dim]
-
-                # 双向交叉注意力
-                with torch.no_grad():
-                    obj_attended, _ = self.cross_attentions[scale_idx](
-                        query=object_feat,
-                        key=text_feat,
-                        value=text_feat,
-                        need_weights=False
-                    )                    
-                    text_attended, _ = self.cross_attentions[scale_idx](
-                        query=text_feat,
-                        key=object_feat,
-                        value=object_feat,
-                        need_weights=False
-                    )                    
-                    # 特征融合
-                    fused_obj_feat = self.fusion_proj[scale_idx](
-                        torch.cat([object_feat, obj_attended], dim=-1)
-                    )
-                    fused_text_feat = self.fusion_proj[scale_idx](
-                        torch.cat([text_feat, text_attended], dim=-1)
-                    )
-                fused_obj_feats.append(fused_obj_feat.squeeze(0))
-                all_fused_text_embeds.append(fused_text_feat.squeeze(0))               
-
-            # 统一更新所有尺度的特征
-            for scale_idx in range(self.num_scales):
-                new_embed = fused_obj_feats[scale_idx]
-                proj_multi_scale_object_embeds[scale_idx][i] = new_embed
-
-            # 权重处理
-            scale_weights = getattr(self, 'adjusted_weights', self.text_scale_weights)
-            # 确保权重数量与尺度数量匹配
-            scale_weights = scale_weights[:self.num_scales]
-            # 归一化权重
-            norm_weights = F.softmax(scale_weights, dim=0)          
-            # 融合多尺度文本表示
-            fused_prompt_embed = torch.zeros_like(all_fused_text_embeds[0])
-            for weight, embed in zip(norm_weights, all_fused_text_embeds):
-                fused_prompt_embed = fused_prompt_embed + (weight * embed)
+            prompt_embed = self.get_text_emb(tmp_prompt, device=device)                     
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
@@ -1143,18 +1051,12 @@ class Chat3D(nn.Module):
                 assigned_ids[i]
             )
             object_list_embed = object_list_embed.unsqueeze(0)
-            if p_0_embed.dim() == 2:
-                p_0_embed = p_0_embed.unsqueeze(0)  # [1, seq_len, hidden_dim]
-            if p_1_embed.dim() == 2:
-                p_1_embed = p_1_embed.unsqueeze(0)  # [1, seq_len, hidden_dim]
-            if fused_prompt_embed.dim() == 2:
-                fused_prompt_embed = fused_prompt_embed.unsqueeze(0)  # [1, seq_len, hidden_dim]
             # 组合文本和视觉特征           
             wrapped_embed = torch.cat([
                 p_0_embed, 
                 object_list_embed, 
                 p_1_embed, 
-                fused_prompt_embed
+                prompt_embed
                 ], dim=1)
             attention_mask=None
             if self.bidirection:
