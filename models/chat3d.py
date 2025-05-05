@@ -925,14 +925,6 @@ class Chat3D(nn.Module):
         # label_weights = torch.ones(self.llama_model.config.vocab_size, device=device)
         # label_weights[self.objid_start_idx:self.objid_end_idx] = 10
 
-        # 计算特征一致性损失
-        # feature_consistency_loss = self.compute_feature_consistency_loss(
-        #     proj_multi_scale_object_embeds if self.use_multi_scale and self.num_scales > 1 else proj_object_embed,
-        #     proj_object_img_embed,
-        #     scene_mask
-        # )
-        
-
         with self.maybe_autocast():
             outputs = self.llama_model(
                 inputs_embeds=input_embeds,
