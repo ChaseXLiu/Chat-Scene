@@ -52,6 +52,8 @@ fi
 tag="${train_tag}__${val_tag}__${other_info}"
 
 pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
+# pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20250421_205600_lr5e-6_ep3_scanrefer#multi3dref#nr3d_caption#obj_align__scanrefer#multi3dref__chatscene/ckpt_01_30150.pth"
+
 
 OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
 mkdir -p ${OUTPUT_DIR}

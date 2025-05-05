@@ -76,15 +76,16 @@ class Chat3D(nn.Module):
         # 空间多尺度特征分组配置
         self.use_multi_scale = config.model.use_multi_scale
         self.num_scales = config.model.num_scales
-        self.token_groups = ['semantic', 'geometry', 'texture']
+        self.multi_scale_levels = ['semantic', 'geometry', 'texture']
         initial_weights = torch.tensor([0.5, 0.3, 0.2])  # 语义、几何、纹理的初始权重
-        self.token_group_weights = nn.Parameter(initial_weights)
-        self.use_token_groups = config.model.use_token_groups
+        self.multi_scale_weights = nn.Parameter(initial_weights)
 
         # 文本多尺度处理配置
         self.use_text_multi_scale = config.model.use_text_multi_scale
         self.text_scale_levels = ['coarse', 'fine', 'detailed']
-        self.text_scale_weights = nn.Parameter(torch.ones(len(self.text_scale_levels)) / len(self.text_scale_levels))
+        # self.text_scale_weights = nn.Parameter(torch.ones(len(self.text_scale_levels)) / len(self.text_scale_levels))
+        initial_weights = torch.tensor([0.5, 0.3, 0.2])  # 粗粒度、细粒度、详细描述的初始权重
+        self.text_scale_weights = nn.Parameter(initial_weights)
 
         # 特征一致性损失配置
         self.use_feature_consistency = config.model.use_feature_consistency
@@ -320,7 +321,7 @@ class Chat3D(nn.Module):
         p_1_embed = self.llama_embed_tokens(p_1_token.input_ids).squeeze(0).detach()
         return p_0_embed, p_1_embed
 
-    def get_text_emb(self, text, device="cpu", multi_scale=True):
+    def get_text_emb(self, text, device="cpu"):
         """为文本提供embedding表示
         同时支持对新增token的embedding进行选择性训练
         这对于扩展LLaMA的词表(如添加物体ID token)非常重要        
@@ -338,34 +339,87 @@ class Chat3D(nn.Module):
             embeds = (1 - indices) * embeds.detach() + indices * embeds
         else:
             embeds = embeds.detach()
-        return embeds
-        # if not multi_scale:
+        # return embeds
+        # if not self.use_text_multi_scale:
         #     return embeds
         
-        # """=============== 此处的处理逻辑待修改/ ==============="""
-        # # 多尺度处理
-        # base_embed = embeds.squeeze(0)
-        # multi_scale_embeds = []
-        # # 粗粒度表示 (原始embedding)
-        # multi_scale_embeds.append(base_embed)
-        # # 细粒度表示 (自注意力增强)
-        # if base_embed.dim() == 2:  # [seq_len, hidden_dim]
-        #     with torch.no_grad():
-        #         attn_weights = torch.matmul(base_embed, base_embed.transpose(0,1)) / (self.llama_dim**0.5)
-        #         fine_embed = torch.matmul(F.softmax(attn_weights, dim=-1), base_embed)
-        #     multi_scale_embeds.append(fine_embed)
-        # # 详细表示 (位置加权)
-        # seq_len = base_embed.shape[0]
-        # with torch.no_grad():
-        #     pos_weights = 1.0 - 0.8 * torch.abs(
-        #         torch.arange(seq_len, device=device) - seq_len/2) / (seq_len/2)
-        #     detailed_embed = base_embed * pos_weights.unsqueeze(-1)
-        # multi_scale_embeds.append(detailed_embed)
-        # # 应用可学习权重
-        # # if hasattr(self, 'text_scale_weights'):
-        # #     return [w * feat for w, feat in zip(self.text_scale_weights, multi_scale_embeds)]
-        # """=============== /此处的处理逻辑待修改 ==============="""
+        # # 多尺度文本处理
+        base_embed = embeds.squeeze(0)
+        multi_scale_embeds = []
+        # 第一个尺度：全局语义 - 捕捉整体语义信息
+        # 使用平均池化获取全局表示，并增强句子开头和结尾的权重
+        with torch.no_grad():
+            seq_len = base_embed.shape[0]
+            # 创建位置权重，句子开头和结尾通常包含更多全局信息
+            pos_weights = torch.ones(seq_len, device=device)
+            pos_weights[:min(5, seq_len)] = 1.5  # 增强开头权重
+            pos_weights[max(0, seq_len-5):] = 1.5  # 增强结尾权重
+            # 应用位置权重
+            coarse_embed = base_embed * pos_weights.unsqueeze(-1)
+        multi_scale_embeds.append(coarse_embed)
 
+        # 第二个尺度：局部几何 - 关注物体之间的相对位置关系
+        # 使用自注意力增强局部关系表示
+        with torch.no_grad():
+            # 计算token间的注意力权重
+            attn_weights = torch.matmul(base_embed, base_embed.transpose(0, 1)) / (self.llama_dim**0.5)
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            # 应用注意力权重获取上下文增强的表示
+            fine_embed = torch.matmul(attn_weights, base_embed)
+            
+            # 增强关系词的权重
+            relation_keywords = ["in", "on", "at", "near", "between", "beside", "under", "above", "left", "right", "front", "back"]
+            relation_mask = torch.zeros(seq_len, device=device)
+            
+            # 解码每个token并检查是否包含关系词
+            for i, token_id in enumerate(text_tokens.input_ids[0]):
+                token = self.llama_tokenizer.decode(token_id)
+                if any(keyword in token.lower() for keyword in relation_keywords):
+                    relation_mask[i] = 1.0
+            
+            # 应用关系词增强
+            fine_embed = fine_embed + fine_embed * relation_mask.unsqueeze(-1) * 0.5
+        multi_scale_embeds.append(fine_embed)
+
+        # 第三个尺度：细粒度纹理 - 关注物体的细节描述
+        # 增强描述性词汇的权重
+        with torch.no_grad():
+            # 基础表示
+            detailed_embed = base_embed.clone()
+            
+            # 定义描述性词汇关键词
+            detail_keywords = ["color", "texture", "material", "size", "shape", "white", "brown", "small", "large", "wooden", "metal", "glass"]
+            detail_mask = torch.zeros(seq_len, device=device)
+            
+            # 解码每个token并检查是否包含描述性词汇
+            for i, token_id in enumerate(text_tokens.input_ids[0]):
+                token = self.llama_tokenizer.decode(token_id)
+                if any(keyword in token.lower() for keyword in detail_keywords):
+                    detail_mask[i] = 1.0
+            
+            # 应用描述性词汇增强
+            detailed_embed = detailed_embed + detailed_embed * detail_mask.unsqueeze(-1) * 0.5
+        multi_scale_embeds.append(detailed_embed)
+
+        # 自适应权重
+        # 计算每个尺度的特征统计信息
+        scale_stats = []
+        for embed in multi_scale_embeds:
+            # 计算每个尺度的统计特征（均值和方差）
+            mean_feat = torch.mean(embed, dim=0, keepdim=True)
+            var_feat = torch.var(embed, dim=0, keepdim=True)
+            scale_stats.append(torch.cat([mean_feat, var_feat], dim=-1))        
+        scale_stats = torch.cat(scale_stats, dim=0)  # [num_scales, 2*llama_dim]        
+        # 使用softmax计算自适应权重
+        scale_importance = torch.sum(scale_stats, dim=-1)  # [num_scales]
+        adaptive_weights = F.softmax(scale_importance * self.text_scale_weights, dim=0)        
+        # 应用自适应权重进行特征融合
+        weighted_embeds = [w * embed for w, embed in zip(adaptive_weights, multi_scale_embeds)]
+        fused_embed = torch.stack(weighted_embeds).sum(dim=0)        
+        # 保持原始形状
+        fused_embed = fused_embed.unsqueeze(0)
+        
+        return fused_embed
         # return multi_scale_embeds
 
     def encode_object_feat(self, feat, img_feat, locs):
@@ -394,7 +448,7 @@ class Chat3D(nn.Module):
         multi_scale_feats.append(texture_feat)
 
         # 确保权重数量与特征数量匹配
-        weights = self.token_group_weights[:len(multi_scale_feats)]
+        weights = self.multi_scale_weights[:len(multi_scale_feats)]
         # 归一化权重
         norm_weights = F.softmax(weights, dim=0)            
         # 融合多尺度特征

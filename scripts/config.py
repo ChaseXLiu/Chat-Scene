@@ -285,8 +285,8 @@ optimizer = dict(
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(
         enable=True,
-        module_names=["model.embed_tokens", "token_group_weights"],
-        lr=[5e-4,  2.5e-2],
+        module_names=["model.embed_tokens", "multi_scale_weights", "text_scale_weights"],
+        lr=[5e-4,  2.5e-2, 2.5e-2],
         wd=[0.02, 0.01]
     ),
 )
