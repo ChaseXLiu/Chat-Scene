@@ -1,17 +1,18 @@
 #! /bin/bash
 
 # scannet_dir="/mnt/petrelfs/share_data/maoxiaohan/ScanNet_v2"
-scannet_dir="/mnt/hwfile/OpenRobotLab/huanghaifeng/data/scannet"
+scannet_dir="/home/lcx/data/data/rawscannet/"
 version=""
-segment_result_dir="/mnt/hwfile/OpenRobotLab/huanghaifeng/data/processed/scannet/Mask3DInst"
+# segment_result_dir="/home/lcx/data/data/processed/scannet200/Mask3DInst/"
+segment_result_dir= = ""
 # segment_result_dir="/mnt/petrelfs/share_data/chenyilun/haifeng/Mask3DInst"
-inst_seg_dir=""
+inst_seg_dir="/home/lcx/data/data/processed/scannet200/mask3d_inst_seg/"
 class_label_file="annotations/scannet/scannetv2-labels.combined.tsv"
 max_obj_num=100
 
 train_iou_thres=0.5
 
-processed_data_dir="/mnt/hwfile/OpenRobotLab/huanghaifeng/data/processed/scannet/mask3d_ins_data"
+processed_data_dir="/home/lcx/data/data/processed/scannet200/mask3d_ins_data"
 # processed_data_dir="/mnt/petrelfs/share_data/chenyilun/haifeng/mask3d_ins_data"
 segmentor="mask3d"
 # processed_data_dir="/mnt/petrelfs/share_data/chenyilun/share/mask3d/proposals"
