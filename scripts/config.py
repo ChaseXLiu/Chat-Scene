@@ -250,14 +250,12 @@ model = dict(
     fuse_with_id=False,
     use_objid=True,
     use_location_token=False,
-    use_multi_scale=True,  # 是否启用多尺度表示
-    num_scales=3,  # L: 3D视觉尺度层级数
-    use_token_groups=True,
     use_text_multi_scale=True,  # 是否使用多尺度文本表示
-    use_feature_consistency=True,  # 特征一致性损失
-    feature_consistency_weight=0.1,
-    use_spatial_attention=True,  # 空间关系注意力 
-    spatial_attention_weight=0.1
+    use_codebook = True,
+    codebook_dim = 512,
+    global_codebook_size = 8,
+    local_codebook_size = 16,
+    texture_codebook_size = 8,
 )
 
 lora = dict(
@@ -285,9 +283,10 @@ optimizer = dict(
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(
         enable=True,
-        module_names=["model.embed_tokens"],
-        lr=[5e-4],
-        wd=[0.02, 0.01]
+        # module_names=["model.embed_tokens"],
+        module_names=["global_codebook", "local_codebook", "texture_codebook"],
+        lr=[5e-4, 5e-4, 5e-4],
+        wd=[0.02, 0.02, 0.02]
     ),
 )
 
