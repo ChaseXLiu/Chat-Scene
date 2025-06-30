@@ -94,14 +94,6 @@ def train(
     accum_iter = 1
     eval_freq = len(train_loader)
 
-        # 在每个 epoch 开始时，清空历史记录
-    if hasattr(model_without_ddp, 'global_attn_weights_history'):
-        model_without_ddp.global_attn_weights_history.clear()
-    if hasattr(model_without_ddp, 'local_attn_weights_history'):
-        model_without_ddp.local_attn_weights_history.clear()
-    if hasattr(model_without_ddp, 'texture_attn_weights_history'):
-        model_without_ddp.texture_attn_weights_history.clear()
-
     optimizer.zero_grad()
     iterator = metric_logger.log_every(train_loader, log_freq, header)
     for i, (media_type, batch) in enumerate(iterator):
@@ -169,62 +161,12 @@ def train(
                 if i != len(train_loader) - 1 and config.do_save and not config.debug:
                     torch.save(save_obj, join(config.output_dir, f"ckpt_{epoch:02d}_{global_step}.pth"))
         if global_step > max_global_step:
-            # 在返回前，也执行一次码本利用率分析 (如果列表非空)
-            if is_main_process() and hasattr(model_without_ddp, 'global_attn_weights_history') and len(model_without_ddp.global_attn_weights_history) > 0:
-                log_codebook_utilization(model_without_ddp, epoch, global_step, config, logger, "final_step_in_epoch")
             return global_step
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     logger.info(f"Averaged stats: {metric_logger.global_avg()}")
-    # 在 epoch 结束时分析码本利用率
-    if is_main_process() and hasattr(model_without_ddp, 'global_attn_weights_history') and len(model_without_ddp.global_attn_weights_history) > 0:
-        log_codebook_utilization(model_without_ddp, epoch, global_step, config, logger, "epoch_end")
     return global_step
-
-# 新增一个辅助函数来处理码本利用率的日志记录
-def log_codebook_utilization(model_without_ddp, epoch, global_step, config, logger, log_prefix=""):
-    if not hasattr(model_without_ddp, 'use_codebook') or not model_without_ddp.use_codebook:
-        return
-
-    histories = {
-        "Global": model_without_ddp.global_attn_weights_history,
-        "Local": model_without_ddp.local_attn_weights_history,
-        "Texture": model_without_ddp.texture_attn_weights_history
-    }
-
-    codebook_util_logs = {}
-
-    for name, history in histories.items():
-        if len(history) > 0:
-            # 历史记录中的张量应该已经在CPU上了 (根据我们对 Chat3D.encode_object_feat 的修改)
-            all_weights = torch.cat(history, dim=0)  # [Total_Samples_Collected, num_codewords]
-            avg_codeword_usage = all_weights.mean(dim=0)  # [num_codewords]
-            
-            logger.info(f"Epoch {epoch} Step {global_step} - Avg {name} Codeword Usage: {avg_codeword_usage.numpy()}")
-            if config.wandb.enable:
-                # wandb.log({f"codebook_util/{log_prefix}_{name}_avg_usage": avg_codeword_usage.numpy()})
-                for idx, val in enumerate(avg_codeword_usage):
-                    codebook_util_logs[f"codebook_util/{log_prefix}_{name}_codeword_{idx}_usage"] = val.item()
-
-            threshold = 0.01 # 示例阈值
-            low_usage_count = (avg_codeword_usage < threshold).sum().item()
-            total_codewords = avg_codeword_usage.shape[0]
-            low_usage_ratio = low_usage_count / total_codewords
-            logger.info(f"Epoch {epoch} Step {global_step} - {name} Codewords with usage < {threshold}: {low_usage_count}/{total_codewords} ({low_usage_ratio*100:.2f}%)")
-            if config.wandb.enable:
-                codebook_util_logs[f"codebook_util/{log_prefix}_{name}_low_usage_ratio (<{threshold})"] = low_usage_ratio
-        else:
-            logger.info(f"Epoch {epoch} Step {global_step} - No attention weights recorded for {name} codebook.")
-
-    if config.wandb.enable and len(codebook_util_logs) > 0:
-        log_dict_to_wandb(codebook_util_logs, step=global_step, prefix=None) # prefix is already in keys
-
-    # 清空历史记录，为下一个统计周期做准备
-    # 注意：如果是在 epoch 开始时清空的，这里就不需要再次清空，除非是按 step 记录
-    # model_without_ddp.global_attn_weights_history.clear()
-    # model_without_ddp.local_attn_weights_history.clear()
-    # model_without_ddp.texture_attn_weights_history.clear()
 
 def evaluate_all(
     model,

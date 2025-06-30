@@ -32,20 +32,22 @@ use_location_token=False
 llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsys--vicuna-7b-v1.5"
 
 # train_tag="scanrefer#scan2cap#scanqa#sqa3d#multi3dref#nr3d_caption#obj_align" 
+
 train_tag="scanrefer#multi3dref#obj_align"
 val_tag="scanrefer#multi3dref"
 
 # evaluate=True
 evaluate=False
+
 debug=False
 if [ $debug = "True" ]; then
     enable_wandb=False
-    gpu_num=1
+    gpu_num=2
     do_save=False
     other_info="debug"
 else
     enable_wandb=False
-    gpu_num=4
+    gpu_num=2
     do_save=True
     other_info="chatscene"
 fi

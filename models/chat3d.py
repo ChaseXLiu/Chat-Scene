@@ -73,14 +73,6 @@ class Chat3D(nn.Module):
         self.fuse_with_id = config.model.fuse_with_id
         self.use_location_token = config.model.use_location_token
 
-        # 空间多尺度特征分组配置
-        # self.use_multi_scale = config.model.use_multi_scale
-        # self.num_scales = config.model.num_scales
-        self.multi_scale_levels = ['semantic', 'geometry', 'texture']
-        initial_weights = torch.tensor([0.5, 0.3, 0.2])  # 语义、几何、纹理的初始权重
-        # initial_weights = torch.ones(self.num_scales) / self.num_scales  # 均匀分配权重
-        self.multi_scale_weights = nn.Parameter(initial_weights)
-
         # 文本多尺度处理配置
         self.use_text_multi_scale = config.model.use_text_multi_scale
         self.text_scale_levels = ['coarse', 'fine', 'detailed']
@@ -99,10 +91,10 @@ class Chat3D(nn.Module):
         # 码本维度配置
         self.codebook_dim = config.model.codebook_dim # 码本向量维度
 
-        # 初始化用于存储注意力权重的列表
-        self.global_attn_weights_history = []
-        self.local_attn_weights_history = []
-        self.texture_attn_weights_history = []
+        # # 初始化用于存储注意力权重的列表
+        # self.global_attn_weights_history = []
+        # self.local_attn_weights_history = []
+        # self.texture_attn_weights_history = []
 
         self.debug = config.debug
         if not self.debug:
@@ -215,58 +207,72 @@ class Chat3D(nn.Module):
         )
 
         # 三层级特征编码与融合模块
-        if self.use_codebook:
-            # 全局尺度码本 (G)
-            self.global_codebook = nn.Parameter(
-                torch.randn(self.global_codebook_size, self.codebook_dim)
-            )
-            # 局部尺度码本 (L)
-            self.local_codebook = nn.Parameter(
-                torch.randn(self.local_codebook_size, self.codebook_dim)
-            )
-            # 纹理尺度码本 (T)
-            self.texture_codebook = nn.Parameter(
-                torch.randn(self.texture_codebook_size, self.codebook_dim)
-            )
-            
-            # 特征投影层 - 将输入特征投影到码本空间
-            self.global_proj = nn.Sequential(
-                nn.Linear(self.input_dim, self.codebook_dim),
-                nn.LayerNorm(self.codebook_dim),
-                nn.GELU()
-            )
-            
-            self.local_proj = nn.Sequential(
-                nn.Linear(self.input_dim, self.codebook_dim),
-                nn.LayerNorm(self.codebook_dim),
-                nn.GELU()
-            )
-            
-            self.texture_proj = nn.Sequential(
-                nn.Linear(self.input_dim, self.codebook_dim),
-                nn.LayerNorm(self.codebook_dim),
-                nn.GELU()
-            )
-            
-            # 码本输出投影到LLaMA空间
-            # self.global_to_llama = nn.Linear(self.codebook_dim, self.llama_dim)
-            # self.local_to_llama = nn.Linear(self.codebook_dim, self.llama_dim)
-            # self.texture_to_llama = nn.Linear(self.codebook_dim, self.llama_dim)
-            
-            # 特征融合层 - 使用多头注意力机制
-            self.fusion_attn = nn.MultiheadAttention(self.llama_dim, num_heads=8, batch_first=True)
-            
-            # 特征门控网络 - 动态调整不同尺度特征的重要性
-            self.gate_network_codebook = nn.Sequential(
-                nn.Linear(self.codebook_dim * 3, 3),
-                nn.Softmax(dim=-1)
-            )
-            # 层级化注意力模块
-            self.global_level_attention = nn.MultiheadAttention(self.codebook_dim, num_heads=4, batch_first=True)
-            self.local_level_attention = nn.MultiheadAttention(self.codebook_dim, num_heads=4, batch_first=True)
-            self.texture_level_attention = nn.MultiheadAttention(self.codebook_dim, num_heads=4, batch_first=True)
-            # 最终的融合层
-            self.stacked_fusion_layer = nn.Linear(self.codebook_dim, self.codebook_dim)
+        # 全局尺度码本 (G)
+        self.global_codebook = nn.Parameter(
+            torch.randn(self.global_codebook_size, self.codebook_dim)
+        )
+        # 局部尺度码本 (L)
+        self.local_codebook = nn.Parameter(
+            torch.randn(self.local_codebook_size, self.codebook_dim)
+        )
+        # 纹理尺度码本 (T)
+        self.texture_codebook = nn.Parameter(
+            torch.randn(self.texture_codebook_size, self.codebook_dim)
+        )
+        
+        # 特征投影层 - 将输入特征投影到码本空间
+        self.global_proj = nn.Sequential(
+            nn.Linear(self.input_dim, self.codebook_dim),
+            nn.LayerNorm(self.codebook_dim),
+            nn.GELU()
+        )
+        
+        self.local_proj = nn.Sequential(
+            nn.Linear(self.input_dim, self.codebook_dim),
+            nn.LayerNorm(self.codebook_dim),
+            nn.GELU()
+        )
+        
+        self.texture_proj = nn.Sequential(
+            nn.Linear(self.input_dim, self.codebook_dim),
+            nn.LayerNorm(self.codebook_dim),
+            nn.GELU()
+        )
+
+        # 层级化注意力模块
+        self.global_level_attention = nn.MultiheadAttention(self.codebook_dim, num_heads=4, batch_first=True)
+        self.local_level_attention = nn.MultiheadAttention(self.codebook_dim, num_heads=4, batch_first=True)
+        self.texture_level_attention = nn.MultiheadAttention(self.codebook_dim, num_heads=4, batch_first=True)
+
+        # 融合多尺度空间特征的注意力层
+        self.multi_scale_fusion_attention = nn.MultiheadAttention(self.codebook_dim, num_heads=4, batch_first=True)
+
+        # 交叉查询文本与空间的注意力层
+        # self.cross_query_attention = nn.MultiheadAttention(self.codebook_dim, num_heads=4, batch_first=True)
+
+        self.text_to_global_cross_attn = nn.MultiheadAttention(
+            embed_dim=self.llama_dim, 
+            kdim=self.codebook_dim, 
+            vdim=self.codebook_dim, 
+            num_heads=4, batch_first=True
+        )
+        # self.norm_text_after_global_attn = nn.LayerNorm(self.llama_dim)
+
+        self.text_to_local_cross_attn = nn.MultiheadAttention(
+            embed_dim=self.llama_dim, 
+            kdim=self.codebook_dim, 
+            vdim=self.codebook_dim, 
+            num_heads=4, batch_first=True
+        )
+        # self.norm_text_after_local_attn = nn.LayerNorm(self.llama_dim)
+
+        self.text_to_texture_cross_attn = nn.MultiheadAttention(
+            embed_dim=self.llama_dim, 
+            kdim=self.codebook_dim, 
+            vdim=self.codebook_dim, 
+            num_heads=4, batch_first=True
+        )
+        # self.norm_text_after_texture_attn = nn.LayerNorm(self.llama_dim)
 
         if not self.train_img_proj:
             for p in self.object_img_proj.parameters():
@@ -359,10 +365,8 @@ class Chat3D(nn.Module):
         else:
             embeds = embeds.detach()
         # return embeds
-        # if not self.use_text_multi_scale:
-        #     return embeds
         
-        # # 多尺度文本处理
+        # 多尺度文本处理
         base_embed = embeds.squeeze(0)
         multi_scale_embeds = []
         # 第一个尺度：全局语义 - 捕捉整体语义信息
@@ -437,9 +441,20 @@ class Chat3D(nn.Module):
         fused_embed = torch.stack(weighted_embeds).sum(dim=0)        
         # 保持原始形状
         fused_embed = fused_embed.unsqueeze(0)
-        
         return fused_embed
+
         # return multi_scale_embeds
+
+    # def get_text_emb(self, text, device="cpu"):
+    #     text_tokens = self.llama_tokenizer(text, return_tensors="pt", add_special_tokens=False).to(device)
+    #     embeds = self.llama_embed_tokens(text_tokens.input_ids)
+    #     if self.train_emb:
+    #         indices = text_tokens.input_ids >= self.ori_vocab_size
+    #         indices = (indices * 1).unsqueeze(-1)
+    #         embeds = (1 - indices) * embeds.detach() + indices * embeds
+    #     else:
+    #         embeds = embeds.detach()
+    #     return embeds
 
     def encode_object_feat(self, feat, img_feat, locs):
         """
@@ -453,147 +468,73 @@ class Chat3D(nn.Module):
 
         B, N_obj, _ = feat.shape
 
-        if self.use_codebook: 
-            # 将特征分割为三个部分：全局、局部和纹理
-            global_feat, local_feat, texture_feat = torch.split(feat, 1024, dim=-1)
-            # global_feat_orig, local_feat_orig, texture_feat_orig = torch.split(feat, feat.shape[-1] // 3, dim=-1)
-            
-            # 1. 特征投影到码本空间，作为与各层级 codebook 交互的“基础查询”
-            projected_global_q = self.global_proj(global_feat)  # [B, N_obj, codebook_dim]
-            projected_local_q = self.local_proj(local_feat)  # [B, N_obj, codebook_dim]
-            projected_texture_q = self.texture_proj(texture_feat)  # [B, N_obj, codebook_dim]
-            
-            # --------- 开始堆叠注意力与 Codebook 交互 ---------
-            current_refined_feature = projected_global_q # 从原始特征的投影开始，作为初始输入
-            # current_refined_feature = projected_global_q # 从投影开始
+        # 将特征分割为三个部分：全局、局部和纹理
+        global_feat, local_feat, texture_feat = torch.split(feat, 1024, dim=-1)
+        # global_feat_orig, local_feat_orig, texture_feat_orig = torch.split(feat, feat.shape[-1] // 3, dim=-1)
+        
+        # 1. 特征投影到码本空间，作为与各层级  交互的“基础查询”
+        projected_global_q = self.global_proj(global_feat)  # [B, N_obj, codebook_dim]
+        projected_local_q = self.local_proj(local_feat)  # [B, N_obj, codebook_dim]
+        projected_texture_q = self.texture_proj(texture_feat)  # [B, N_obj, codebook_dim]
+        
+        # --------- 开始分支查询注意力与 Codebook 交互 ---------\
+        # current_refined_feature = projected_global_q # 从投影开始
 
-            # 阶段 1: 与全局 Codebook 交互
-            # Query: 当前提炼的特征 (初始可以是 projected_global_q)
-            # Key & Value: self.global_codebook
-            # unsqueeze(0).repeat(B,1,1) 是为了将 (N_codebook, D_codebook) 扩展为 (B, N_codebook, D_codebook) 以匹配批处理
-            global_codebook_expanded = self.global_codebook.unsqueeze(0).repeat(B, 1, 1)
-            # 使用 projected_global_q 作为与全局码本交互的查询
-            refined_feat_from_global, global_attn_weights = self.global_level_attention(
-                query=projected_global_q, 
-                key=global_codebook_expanded, 
-                value=global_codebook_expanded
-            ) # Output: B, N_obj, D_codebook
-            # 更新当前提炼的特征，可以简单替换，或使用残差连接/门控等
-            # current_refined_feature = refined_feat_from_global 
-            current_refined_feature = current_refined_feature + refined_feat_from_global # (可选) 残差
-            # current_refined_feature = self.some_fusion_layer_1(torch.cat([current_refined_feature, refined_feat_from_global], dim=-1)) # (可选)
+        # 阶段 1: 与全局 Codebook 交互
+        # Query: 当前提炼的特征 (初始可以是 projected_global_q)
+        # Key & Value: self.global_codebook
+        # unsqueeze(0).repeat(B,1,1) 是为了将 (N_codebook, D_codebook) 扩展为 (B, N_codebook, D_codebook) 以匹配批处理
+        global_codebook_expanded = self.global_codebook.unsqueeze(0).repeat(B, 1, 1)
+        # 使用 projected_global_q 作为与全局码本交互的查询
+        refined_global_feature, global_attn_weights = self.global_level_attention(
+            query=projected_global_q, 
+            key=global_codebook_expanded, 
+            value=global_codebook_expanded
+        ) # Output: B, N_obj, D_codebook
+        refined_global_feature = projected_global_q + refined_global_feature
 
-            if self.training: # 仅在训练时收集
-                # global_attn_weights 的形状是 [B, N_obj, num_global_codewords]
-                # 关心的是每个 codeword 被关注的程度，可以对 N_obj 维度求平均或求和
-                self.global_attn_weights_history.append(global_attn_weights.detach().mean(dim=1).cpu()) # [B, num_global_codewords]
+        # if self.training: # 仅在训练时收集
+        #     # global_attn_weights 的形状是 [B, N_obj, num_global_codewords]
+        #     # 关心的是每个 codeword 被关注的程度，可以对 N_obj 维度求平均或求和
+        #     self.global_attn_weights_history.append(global_attn_weights.detach().mean(dim=1).cpu()) # [B, num_global_codewords]
 
-            # 阶段 2: 基于上一阶段的输出，与局部 Codebook 交互
-            # Query: 上一阶段提炼出的 current_refined_feature
-            # Key & Value: self.local_codebook
-            local_codebook_expanded = self.local_codebook.unsqueeze(0).repeat(B, 1, 1)
-            # 使用 projected_local_q 作为与局部码本交互的查询，但上下文来自 current_refined_feature
-            # 或者，更直接地，让 current_refined_feature 作为 query 去查询 local_codebook
-            refined_feat_from_local, local_attn_weights = self.local_level_attention(
-                query=current_refined_feature, # 使用上一层提炼的特征作为查询
-                key=local_codebook_expanded, 
-                value=local_codebook_expanded
-            ) # Output: B, N_obj, D_codebook
-            # 更新当前提炼的特征
-            # current_refined_feature = refined_feat_from_local # 或者更复杂的融合
-            current_refined_feature = current_refined_feature + refined_feat_from_local # (可选) 残差
+        # 阶段 2: 基于上一阶段的输出，与局部 Codebook 交互
+        # Query: 上一阶段提炼出的 current_refined_feature
+        # Key & Value: self.local_codebook
+        local_codebook_expanded = self.local_codebook.unsqueeze(0).repeat(B, 1, 1)
+        # 使用 projected_local_q 作为与局部码本交互的查询，但上下文来自 current_refined_feature
+        # 或者，更直接地，让 current_refined_feature 作为 query 去查询 local_codebook
+        refined_local_feature, local_attn_weights = self.local_level_attention(
+            query=projected_local_q, # 使用上一层提炼的特征作为查询
+            key=local_codebook_expanded, 
+            value=local_codebook_expanded
+        ) # Output: B, N_obj, D_codebook
+        refined_local_feature = projected_local_q + refined_local_feature
 
-            if self.training:
-                self.local_attn_weights_history.append(local_attn_weights.detach().mean(dim=1).cpu())
+        # if self.training:
+        #     self.local_attn_weights_history.append(local_attn_weights.detach().mean(dim=1).cpu())
 
-            # 阶段 3: 基于再上一阶段的输出，与纹理 Codebook 交互
-            # Query: 上一阶段提炼出的 current_refined_feature
-            # Key & Value: self.texture_codebook
-            texture_codebook_expanded = self.texture_codebook.unsqueeze(0).repeat(B, 1, 1)
-            refined_feat_from_texture, texture_attn_weights = self.texture_level_attention(
-                query=current_refined_feature, # 使用上一层提炼的特征作为查询
-                key=texture_codebook_expanded, 
-                value=texture_codebook_expanded
-            ) # Output: B, N_obj, D_codebook
-            # 最终的码本增强特征
-            # final_codebook_feat = refined_feat_from_texture # 或者更复杂的融合
-            final_codebook_feat = current_refined_feature + refined_feat_from_texture # (可选) 残差
+        # 阶段 3: 基于再上一阶段的输出，与纹理 Codebook 交互
+        # Query: 上一阶段提炼出的 current_refined_feature
+        # Key & Value: self.texture_codebook
+        texture_codebook_expanded = self.texture_codebook.unsqueeze(0).repeat(B, 1, 1)
+        refined_texture_feature, texture_attn_weights = self.texture_level_attention(
+            query=projected_texture_q, # 使用上一层提炼的特征作为查询
+            key=texture_codebook_expanded, 
+            value=texture_codebook_expanded
+        ) # Output: B, N_obj, D_codebook
+        refined_texture_feature = projected_texture_q + refined_texture_feature
 
-            if self.training:
-                self.texture_attn_weights_history.append(texture_attn_weights.detach().mean(dim=1).cpu())
-            
-            # (另一种融合方式): 如果您希望保留每一层提炼的特征，最后再融合它们
-            # final_codebook_feat = self.stacked_fusion_layer(torch.cat([refined_feat_from_global, refined_feat_from_local, refined_feat_from_texture], dim=-1))
-            # 注意：如果用上面的 cat 方式，stacked_fusion_layer 的输入维度是 D_codebook*3
-            # 如果只是想用最后一层的输出，那就不需要 stacked_fusion_layer，直接用 refined_feat_from_texture
-            # 或者，也可以简单地将三者加权平均或直接相加（如果维度一致且希望它们贡献相似）
-            # final_codebook_feat = (refined_feat_from_global + refined_feat_from_local + refined_feat_from_texture) / 3.0
+        # if self.training:
+        #     self.texture_attn_weights_history.append(texture_attn_weights.detach().mean(dim=1).cpu())
 
-            # --------- 堆叠注意力与 Codebook 交互结束 ---------
+        # 使用全局特征作为查询，查询其他特征的组合
+        query_feature = refined_global_feature
+        key_value_features = torch.cat((refined_local_feature, refined_texture_feature), dim=1) # B, 2*N_obj, D_codebook
+        fused_feature, _ = self.multi_scale_fusion_attention(query_feature, key_value_features, key_value_features)
+        final_codebook_feat = query_feature + fused_feature
 
-            # 将最终融合后的码本特征投影到LLaMA空间
-            # obj_embeds = self.object_proj(final_codebook_feat) # B, N_obj, D_llama
-
-            return final_codebook_feat, img_feat
-
-            # # 2. 码本关联（通过注意力机制）
-            # global_attn = torch.matmul(global_proj.unsqueeze(1), self.global_codebook.transpose(0, 1))  # [B, 1, global_codebook_size]
-            # local_attn = torch.matmul(local_proj.unsqueeze(1), self.local_codebook.transpose(0, 1))  # [B, 1, local_codebook_size]
-            # texture_attn = torch.matmul(texture_proj.unsqueeze(1), self.texture_codebook.transpose(0, 1))  # [B, 1, texture_codebook_size]
-            
-            # # 3. 多尺度特征融合
-            # global_context = torch.matmul(F.softmax(global_attn, dim=-1), self.global_codebook)  # [B, 1, codebook_dim]
-            # local_context = torch.matmul(F.softmax(local_attn, dim=-1), self.local_codebook)  # [B, 1, codebook_dim]
-            # texture_context = torch.matmul(F.softmax(texture_attn, dim=-1), self.texture_codebook)  # [B, 1, codebook_dim]
-            
-            # # 4. 在码本空间直接融合特征
-            # global_context_squeezed = global_context.squeeze(1)  # [B, codebook_dim]
-            # local_context_squeezed = local_context.squeeze(1)  # [B, codebook_dim]
-            # texture_context_squeezed = texture_context.squeeze(1)  # [B, codebook_dim]
-
-            # combined_features_codebook = torch.cat([global_context_squeezed, local_context_squeezed, texture_context_squeezed], dim=-1)  # [B, codebook_dim*3]
-            
-            # # 5. 自适应特征融合
-            # # 方法1: 使用门控网络
-            # gates_codebook = self.gate_network_codebook(combined_features_codebook)  # [B, 3]
-            # fused_feat_codebook = (
-            #     gates_codebook[:, :, 0].unsqueeze(-1) * global_context_squeezed +
-            #     gates_codebook[:, :, 1].unsqueeze(-1) * local_context_squeezed +
-            #     gates_codebook[:, :, 2].unsqueeze(-1) * texture_context_squeezed
-            # )  # [B, codebook_dim]
-            
-            # 方法2: 使用多头注意力机制进行融合
-            # stacked_features = torch.stack([global_llama, local_llama, texture_llama], dim=1)  # [B, 3, llama_dim]
-            # fused_feat, _ = self.fusion_attn(stacked_features, stacked_features, stacked_features)  # [B, 3, llama_dim]
-            # fused_feat = torch.mean(fused_feat, dim=1)  # [B, llama_dim]
-            
-            # return fused_feat_codebook, img_feat
-        else:
-            # 原始处理方式
-            # 截取多尺度信息
-            global_feat, local_feat, texture_feat = torch.split(feat, 1024, dim=-1)
-
-            # 创建多尺度特征表示
-            multi_scale_feats = []
-            
-            # 第一个尺度：全局语义
-            multi_scale_feats.append(global_feat)
-            
-            # 第二个尺度：局部几何
-            multi_scale_feats.append(local_feat)
-            
-            # 第三个尺度：细粒度纹理
-            multi_scale_feats.append(texture_feat)
-
-            # 确保权重数量与特征数量匹配
-            weights = self.multi_scale_weights[:len(multi_scale_feats)]
-            
-            # 融合多尺度特征
-            fused_feat = torch.zeros_like(multi_scale_feats[0])
-            for i, scale_feat in enumerate(multi_scale_feats):
-                fused_feat += weights[i] * scale_feat
-                
-            return fused_feat, img_feat
+        return final_codebook_feat, img_feat, (refined_global_feature, refined_local_feature, refined_texture_feature)
     
     @staticmethod
     def get_dist_attention(pos, dist_exp=1):
@@ -654,7 +595,6 @@ class Chat3D(nn.Module):
         if not self.train_emb:
             objid_embeds = objid_embeds.detach()
         selected_objid_embeds = objid_embeds[valid_ids]
-
         if self.use_location_token:
             object_list_embed = torch.zeros((selected_objid_embeds.shape[0] * 2, selected_objid_embeds.shape[1]), dtype=selected_objid_embeds.dtype, device=selected_objid_embeds.device)
             object_list_embed[0::2, :] += embed_obj[assigned_ids]
@@ -733,6 +673,21 @@ class Chat3D(nn.Module):
         maxs = masked_xyz_max.max(dim=1)[0]
         return mins, maxs
 
+    def print_stats(self, name, tensor):
+        print(f"{name}:")
+        print(f"  Shape: {tensor.shape}")
+        print(f"  Mean: {tensor.mean().item():.6f}")
+        print(f"  Std:  {tensor.std().item():.6f}")
+        print(f"  Min:  {tensor.min().item():.6f}")
+        print(f"  Max:  {tensor.max().item():.6f}")
+
+    def normalize_to_reference_scale(self, new_embed, ref_embed):
+        """将 new_embed 调整到与 ref_embed 相同的均值与标准差"""
+        ref_mean = ref_embed.mean()
+        ref_std = ref_embed.std()
+        new_embed = (new_embed - new_embed.mean()) / (new_embed.std() + 1e-6)
+        return new_embed * ref_std + ref_mean
+
     def forward_train(self, scene_feat, scene_img_feat, scene_locs, scene_mask, obj_ids, assigned_ids, questions, answers, is_eval=False, **kwargs):
         """3D场景对话模型的训练前向传播
         核心流程:
@@ -750,9 +705,7 @@ class Chat3D(nn.Module):
             包含各项损失的字典
         """       
         # 获取对象嵌入
-        # print("scene_feat的大小为: ", scene_feat.shape) #torch.Size([8, 100, 1024]) --> torch.Size([8, 100, 3072])
-        # proj_object_embed, object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
-        object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
+        object_embed, object_img_embed, refined_feats = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
         device = object_embed.device
         batch_size = object_embed.shape[0]
         proj_object_embed = self.object_proj(object_embed)
@@ -788,7 +741,41 @@ class Chat3D(nn.Module):
             # 构建文本提示
             prompt = f"{question} {self.role[1]}: "
             # 使用多尺度文本处理
-            prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)
+            prompt_embed = self.get_text_emb(prompt, device=device)            
+            #==========================文本与空间特征的交叉注意力==========================#
+            # self.print_stats("Prompt embed before attention", prompt_embed)
+            ori_embed = prompt_embed
+            # refined_feats为(global,local,texture)的tuple
+            attended_text_global, _ = self.text_to_global_cross_attn(
+                    query=prompt_embed, 
+                    key=refined_feats[0][i].unsqueeze(0), 
+                    value=refined_feats[0][i].unsqueeze(0)
+                )
+            # self.print_stats("Attended global", attended_text_global)
+            prompt_embed = prompt_embed + 0.1 * attended_text_global
+            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            # self.print_stats("Prompt embed after global", prompt_embed)
+            attended_text_local, _ = self.text_to_local_cross_attn(
+                    query=prompt_embed, 
+                    key=refined_feats[1][i].unsqueeze(0), 
+                    value=refined_feats[1][i].unsqueeze(0)
+                )
+            # self.print_stats("Attended local", attended_text_local)
+            prompt_embed = prompt_embed + 0.1 * attended_text_local
+            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            # self.print_stats("Prompt embed after local", prompt_embed)
+            attended_text_texture, _ = self.text_to_texture_cross_attn(
+                    query=prompt_embed, 
+                    key=refined_feats[2][i].unsqueeze(0), 
+                    value=refined_feats[2][i].unsqueeze(0)
+                )
+            # self.print_stats("Attended texture", attended_text_texture)
+            prompt_embed = prompt_embed + 0.1 * attended_text_texture
+            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            # self.print_stats("Prompt embed after texture", prompt_embed)
+            prompt_embed = prompt_embed.squeeze(0)
+            # self.print_stats("Final embed", prompt_embed)
+            #==========================文本与空间特征的交叉注意力==========================#
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
@@ -801,12 +788,7 @@ class Chat3D(nn.Module):
             # object_list_embed = nclamp(object_list_embed, min=-0.05, max=0.05)
             object_list_intervals.append((p_0_embed.shape[0], p_0_embed.shape[0] + object_list_embed.shape[0]))
             # 组合文本和视觉特征
-            wrapped_embed = torch.cat([
-                p_0_embed, 
-                object_list_embed, 
-                p_1_embed, 
-                prompt_embed
-                ], dim=0)
+            wrapped_embed = torch.cat([p_0_embed, object_list_embed, p_1_embed, prompt_embed], dim=0)
             wrapped_attn = torch.ones(wrapped_embed.size()[:-1], dtype=torch.long).to(wrapped_embed.device)
             empty_target = (
                 torch.ones(wrapped_attn.shape[0], dtype=torch.long).to(device).fill_(-100)
@@ -819,7 +801,7 @@ class Chat3D(nn.Module):
                 to_regress_token.input_ids == self.llama_tokenizer.pad_token_id, -100
             ).squeeze(0)
             # to_regress_embed = self.llama_model.model.embed_tokens(to_regress_token.input_ids).squeeze(0).detach()
-            to_regress_embed = self.get_text_emb(answer, device=device)[0].squeeze(0)
+            to_regress_embed = self.get_text_emb(answer, device=device).squeeze(0)
 
             # 构建模型输入
             target = torch.cat([empty_target, answer_target], dim=0)
@@ -838,9 +820,6 @@ class Chat3D(nn.Module):
                 return padded[:, :max_len]
             return padded
 
-        # 计算空间关系注意力
-        # spatial_attentions = self.compute_spatial_attention(scene_locs, scene_mask) if self.use_spatial_attention else None
-        
         input_embeds = pad_and_trim(input_embed_list, max_seq_len, batch_first=True, padding_value=0).to(device)
         targets = pad_and_trim(target_list, max_seq_len, batch_first=True, padding_value=-100).to(device)
         attention_mask = pad_and_trim(attn_list, max_seq_len, batch_first=True, padding_value=0).to(device)
@@ -855,31 +834,6 @@ class Chat3D(nn.Module):
             for i in range(causal_mask.shape[0]):
                 st, ed = object_list_intervals[i]
                 causal_mask[i, :, st:ed, st:ed] = 1.0
-
-                # # 如果启用了空间关系注意力，应用空间关系权重
-                # if spatial_attentions is not None:
-                #     valid_ids = torch.where(scene_mask[i])[0]
-                #     if len(valid_ids) > 1:  # 至少需要两个物体才能应用空间关系
-                #         spatial_attn = spatial_attentions[i]
-                        
-                #         # 计算物体在序列中的位置
-                #         obj_positions = []
-                #         for j in range(len(valid_ids)):
-                #             if self.use_multi_scale and self.num_scales > 1:
-                #                 # 多尺度模式下，每个物体占用num_scales个位置
-                #                 obj_positions.append(list(range(st + j * self.num_scales, st + (j + 1) * self.num_scales)))
-                #             else:
-                #                 # 单尺度模式下，每个物体占用一个位置
-                #                 obj_positions.append([st + j])
-                        
-                #         # 应用空间关系注意力
-                #         for j in range(len(valid_ids)):
-                #             for k in range(len(valid_ids)):
-                #                 attn_weight = spatial_attn[j, k]
-                #                 for pos_j in obj_positions[j]:
-                #                     for pos_k in obj_positions[k]:
-                #                         causal_mask[i, :, pos_j, pos_k] = attn_weight
-
             attention_mask = causal_mask
         
         # label_weights = torch.ones(self.llama_model.config.vocab_size, device=device)
@@ -892,13 +846,7 @@ class Chat3D(nn.Module):
                 return_dict=True,
                 labels=targets,
                 # label_weights=label_weights
-            ) 
-
-        # 清理不需要的中间变量
-        del input_embeds, targets, attention_mask
-        if 'causal_mask' in locals():
-            del causal_mask
-        torch.cuda.empty_cache()
+            )
 
         return dict(
             loss=outputs.loss,
@@ -924,8 +872,7 @@ class Chat3D(nn.Module):
         返回:
             生成的回答文本列表 [bs]
         """
-        # proj_object_embed, object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
-        object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
+        object_embed, object_img_embed, refined_feats = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
         device = object_embed.device
         batch_size, obj_num = object_embed.shape[:2]
         proj_object_embed = self.object_proj(object_embed)
@@ -939,7 +886,6 @@ class Chat3D(nn.Module):
             # 为每个尺度添加位置嵌入
             proj_object_embed = proj_object_embed + proj_pos_embed
             proj_object_img_embed = proj_object_img_embed + proj_pos_embed
-
         if self.add_scene_token:
             # if self.add_img_token:
             #     object_embed = object_embed + object_img_embed
@@ -955,13 +901,35 @@ class Chat3D(nn.Module):
         p_0_embed = self.p_0_embed.to(device).unsqueeze(0)
         p_1_embed = self.p_1_embed.to(device).unsqueeze(0)
 
-        # 计算空间关系注意力
-        # spatial_attentions = self.compute_spatial_attention(scene_locs, scene_mask) if self.use_spatial_attention else None
         for i in range(batch_size):
             # 构建文本提示
             tmp_prompt = f" {custom_prompt[i]} {self.role[1]}: "
             tmp_prompt = update_caption(tmp_prompt, assigned_ids[i])
-            prompt_embed = self.get_text_emb(tmp_prompt, device=device)                     
+            prompt_embed = self.get_text_emb(tmp_prompt, device=device)
+            #==========================文本与空间特征的交叉注意力==========================#
+            ori_embed = prompt_embed
+            attended_text_global, _ = self.text_to_global_cross_attn(
+                    query=prompt_embed, 
+                    key=refined_feats[0][i].unsqueeze(0), 
+                    value=refined_feats[0][i].unsqueeze(0)
+                )
+            prompt_embed = prompt_embed + 0.1 * attended_text_global
+            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            attended_text_local, _ = self.text_to_local_cross_attn(
+                    query=prompt_embed, 
+                    key=refined_feats[1][i].unsqueeze(0), 
+                    value=refined_feats[1][i].unsqueeze(0)
+                )
+            prompt_embed = prompt_embed + 0.1 * attended_text_local
+            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            attended_text_texture, _ = self.text_to_texture_cross_attn(
+                    query=prompt_embed, 
+                    key=refined_feats[2][i].unsqueeze(0), 
+                    value=refined_feats[2][i].unsqueeze(0)
+                )
+            prompt_embed = prompt_embed + 0.1 * attended_text_texture
+            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            #==========================文本与空间特征的交叉注意力==========================#                   
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
@@ -973,12 +941,7 @@ class Chat3D(nn.Module):
             )
             object_list_embed = object_list_embed.unsqueeze(0)
             # 组合文本和视觉特征           
-            wrapped_embed = torch.cat([
-                p_0_embed, 
-                object_list_embed, 
-                p_1_embed, 
-                prompt_embed
-                ], dim=1)
+            wrapped_embed = torch.cat([p_0_embed, object_list_embed, p_1_embed, prompt_embed], dim=1)
             attention_mask=None
             if self.bidirection:
                 seq_len = wrapped_embed.shape[1]
@@ -987,30 +950,6 @@ class Chat3D(nn.Module):
                 attention_mask = attention_mask[None, None, :, :].expand(1, 1, -1, -1).clone()
                 st, ed = p_0_embed.shape[1], p_0_embed.shape[1] + object_list_embed.shape[1]
                 attention_mask[:, :, st:ed, st:ed] = 1.0
-
-                # 如果启用了空间关系注意力，应用空间关系权重
-                # if spatial_attentions is not None and self.use_spatial_attention:
-                #     valid_ids = torch.where(scene_mask[i])[0]
-                #     if len(valid_ids) > 1:  # 至少需要两个物体才能应用空间关系
-                #         spatial_attn = spatial_attentions[i]
-                        
-                #         # 计算物体在序列中的位置
-                #         obj_positions = []
-                #         for j in range(len(valid_ids)):
-                #             if self.use_multi_scale and self.num_scales > 1:
-                #                 # 多尺度模式下，每个物体占用num_scales个位置
-                #                 obj_positions.append(list(range(st + j * self.num_scales, st + (j + 1) * self.num_scales)))
-                #             else:
-                #                 # 单尺度模式下，每个物体占用一个位置
-                #                 obj_positions.append([st + j])
-                        
-                #         # 应用空间关系注意力
-                #         for j in range(len(valid_ids)):
-                #             for k in range(len(valid_ids)):
-                #                 attn_weight = spatial_attn[j, k]
-                #                 for pos_j in obj_positions[j]:
-                #                     for pos_k in obj_positions[k]:
-                #                         attention_mask[0, 0, pos_j, pos_k] = attn_weight
             
             with self.maybe_autocast():
                 outputs = self.llama_model.generate(
@@ -1050,10 +989,11 @@ class Chat3D(nn.Module):
         enable_autocast = self.device != torch.device("cpu")
 
         if enable_autocast:
-            if torch.cuda.is_bf16_supported() and dtype == torch.bfloat16:
-                return torch.cuda.amp.autocast(dtype=torch.bfloat16)
-            else:
-                return torch.cuda.amp.autocast(dtype=torch.float16)
+            return torch.cuda.amp.autocast(dtype=dtype)
+            # if torch.cuda.is_bf16_supported() and dtype == torch.bfloat16:
+            #     return torch.cuda.amp.autocast(dtype=torch.bfloat16)
+            # else:
+            #     return torch.cuda.amp.autocast(dtype=torch.float16)
         else:
             return contextlib.nullcontext()
 
