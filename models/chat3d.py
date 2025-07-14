@@ -250,28 +250,28 @@ class Chat3D(nn.Module):
         # 交叉查询文本与空间的注意力层
         # self.cross_query_attention = nn.MultiheadAttention(self.codebook_dim, num_heads=4, batch_first=True)
 
-        self.text_to_global_cross_attn = nn.MultiheadAttention(
-            embed_dim=self.llama_dim, 
-            kdim=self.codebook_dim, 
-            vdim=self.codebook_dim, 
-            num_heads=4, batch_first=True
-        )
+        # self.text_to_global_cross_attn = nn.MultiheadAttention(
+        #     embed_dim=self.llama_dim, 
+        #     kdim=self.codebook_dim, 
+        #     vdim=self.codebook_dim, 
+        #     num_heads=4, batch_first=True
+        # )
         # self.norm_text_after_global_attn = nn.LayerNorm(self.llama_dim)
 
-        self.text_to_local_cross_attn = nn.MultiheadAttention(
-            embed_dim=self.llama_dim, 
-            kdim=self.codebook_dim, 
-            vdim=self.codebook_dim, 
-            num_heads=4, batch_first=True
-        )
+        # self.text_to_local_cross_attn = nn.MultiheadAttention(
+        #     embed_dim=self.llama_dim, 
+        #     kdim=self.codebook_dim, 
+        #     vdim=self.codebook_dim, 
+        #     num_heads=4, batch_first=True
+        # )
         # self.norm_text_after_local_attn = nn.LayerNorm(self.llama_dim)
 
-        self.text_to_texture_cross_attn = nn.MultiheadAttention(
-            embed_dim=self.llama_dim, 
-            kdim=self.codebook_dim, 
-            vdim=self.codebook_dim, 
-            num_heads=4, batch_first=True
-        )
+        # self.text_to_texture_cross_attn = nn.MultiheadAttention(
+        #     embed_dim=self.llama_dim, 
+        #     kdim=self.codebook_dim, 
+        #     vdim=self.codebook_dim, 
+        #     num_heads=4, batch_first=True
+        # )
         # self.norm_text_after_texture_attn = nn.LayerNorm(self.llama_dim)
 
         if not self.train_img_proj:
@@ -741,39 +741,39 @@ class Chat3D(nn.Module):
             # 构建文本提示
             prompt = f"{question} {self.role[1]}: "
             # 使用多尺度文本处理
-            prompt_embed = self.get_text_emb(prompt, device=device)            
+            prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)            
             #==========================文本与空间特征的交叉注意力==========================#
             # self.print_stats("Prompt embed before attention", prompt_embed)
-            ori_embed = prompt_embed
+            # ori_embed = prompt_embed
             # refined_feats为(global,local,texture)的tuple
-            attended_text_global, _ = self.text_to_global_cross_attn(
-                    query=prompt_embed, 
-                    key=refined_feats[0][i].unsqueeze(0), 
-                    value=refined_feats[0][i].unsqueeze(0)
-                )
-            # self.print_stats("Attended global", attended_text_global)
-            prompt_embed = prompt_embed + 0.1 * attended_text_global
-            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
-            # self.print_stats("Prompt embed after global", prompt_embed)
-            attended_text_local, _ = self.text_to_local_cross_attn(
-                    query=prompt_embed, 
-                    key=refined_feats[1][i].unsqueeze(0), 
-                    value=refined_feats[1][i].unsqueeze(0)
-                )
-            # self.print_stats("Attended local", attended_text_local)
-            prompt_embed = prompt_embed + 0.1 * attended_text_local
-            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
-            # self.print_stats("Prompt embed after local", prompt_embed)
-            attended_text_texture, _ = self.text_to_texture_cross_attn(
-                    query=prompt_embed, 
-                    key=refined_feats[2][i].unsqueeze(0), 
-                    value=refined_feats[2][i].unsqueeze(0)
-                )
-            # self.print_stats("Attended texture", attended_text_texture)
-            prompt_embed = prompt_embed + 0.1 * attended_text_texture
-            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
-            # self.print_stats("Prompt embed after texture", prompt_embed)
-            prompt_embed = prompt_embed.squeeze(0)
+            # attended_text_global, _ = self.text_to_global_cross_attn(
+            #         query=prompt_embed, 
+            #         key=refined_feats[0][i].unsqueeze(0), 
+            #         value=refined_feats[0][i].unsqueeze(0)
+            #     )
+            # # self.print_stats("Attended global", attended_text_global)
+            # prompt_embed = prompt_embed + 0.1 * attended_text_global
+            # prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            # # self.print_stats("Prompt embed after global", prompt_embed)
+            # attended_text_local, _ = self.text_to_local_cross_attn(
+            #         query=prompt_embed, 
+            #         key=refined_feats[1][i].unsqueeze(0), 
+            #         value=refined_feats[1][i].unsqueeze(0)
+            #     )
+            # # self.print_stats("Attended local", attended_text_local)
+            # prompt_embed = prompt_embed + 0.1 * attended_text_local
+            # prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            # # self.print_stats("Prompt embed after local", prompt_embed)
+            # attended_text_texture, _ = self.text_to_texture_cross_attn(
+            #         query=prompt_embed, 
+            #         key=refined_feats[2][i].unsqueeze(0), 
+            #         value=refined_feats[2][i].unsqueeze(0)
+            #     )
+            # # self.print_stats("Attended texture", attended_text_texture)
+            # prompt_embed = prompt_embed + 0.1 * attended_text_texture
+            # prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            # # self.print_stats("Prompt embed after texture", prompt_embed)
+            # prompt_embed = prompt_embed.squeeze(0)
             # self.print_stats("Final embed", prompt_embed)
             #==========================文本与空间特征的交叉注意力==========================#
             # 获取对象特征列表
@@ -907,28 +907,28 @@ class Chat3D(nn.Module):
             tmp_prompt = update_caption(tmp_prompt, assigned_ids[i])
             prompt_embed = self.get_text_emb(tmp_prompt, device=device)
             #==========================文本与空间特征的交叉注意力==========================#
-            ori_embed = prompt_embed
-            attended_text_global, _ = self.text_to_global_cross_attn(
-                    query=prompt_embed, 
-                    key=refined_feats[0][i].unsqueeze(0), 
-                    value=refined_feats[0][i].unsqueeze(0)
-                )
-            prompt_embed = prompt_embed + 0.1 * attended_text_global
-            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
-            attended_text_local, _ = self.text_to_local_cross_attn(
-                    query=prompt_embed, 
-                    key=refined_feats[1][i].unsqueeze(0), 
-                    value=refined_feats[1][i].unsqueeze(0)
-                )
-            prompt_embed = prompt_embed + 0.1 * attended_text_local
-            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
-            attended_text_texture, _ = self.text_to_texture_cross_attn(
-                    query=prompt_embed, 
-                    key=refined_feats[2][i].unsqueeze(0), 
-                    value=refined_feats[2][i].unsqueeze(0)
-                )
-            prompt_embed = prompt_embed + 0.1 * attended_text_texture
-            prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            # ori_embed = prompt_embed
+            # attended_text_global, _ = self.text_to_global_cross_attn(
+            #         query=prompt_embed, 
+            #         key=refined_feats[0][i].unsqueeze(0), 
+            #         value=refined_feats[0][i].unsqueeze(0)
+            #     )
+            # prompt_embed = prompt_embed + 0.1 * attended_text_global
+            # prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            # attended_text_local, _ = self.text_to_local_cross_attn(
+            #         query=prompt_embed, 
+            #         key=refined_feats[1][i].unsqueeze(0), 
+            #         value=refined_feats[1][i].unsqueeze(0)
+            #     )
+            # prompt_embed = prompt_embed + 0.1 * attended_text_local
+            # prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
+            # attended_text_texture, _ = self.text_to_texture_cross_attn(
+            #         query=prompt_embed, 
+            #         key=refined_feats[2][i].unsqueeze(0), 
+            #         value=refined_feats[2][i].unsqueeze(0)
+            #     )
+            # prompt_embed = prompt_embed + 0.1 * attended_text_texture
+            # prompt_embed = self.normalize_to_reference_scale(prompt_embed, ori_embed)
             #==========================文本与空间特征的交叉注意力==========================#                   
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(

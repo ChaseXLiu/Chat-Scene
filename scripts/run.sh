@@ -36,6 +36,9 @@ llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsy
 train_tag="scanrefer#multi3dref#obj_align"
 val_tag="scanrefer#multi3dref"
 
+# train_tag="multi3dref#obj_align"
+# val_tag="multi3dref"
+
 # evaluate=True
 evaluate=False
 

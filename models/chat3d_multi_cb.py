@@ -146,7 +146,7 @@ class CrossScaleAttention(nn.Module):
         space_stack = space_stack.permute(1, 0, 2)  # [100, 3, 4096]
         # 用 attention 融合每个物体的三个尺度特征
         space_fused, _ = self.space_fusion_attn(space_stack, space_stack, space_stack)  # [100, 3, 4096]
-        # 取每个物体融合后的特征做平均（推荐）
+        # 取每个物体融合后的特征做平均
         space_fused = space_fused.mean(dim=1)  # [100, 4096]
         space_fused = F.normalize(self.up_proj(space_fused), dim=-1)
 
@@ -481,6 +481,7 @@ class Chat3D(nn.Module):
             objid_embeds = objid_embeds.detach()
         selected_objid_embeds = objid_embeds[valid_ids]
 
+        # 语言与与空间特征的cross-attention
         embed_obj, prompt_embed = self.attention_fuser(embed_obj, prompt_embed)
 
         if self.use_location_token:
@@ -591,7 +592,7 @@ class Chat3D(nn.Module):
         for i, question in enumerate(questions):
             prompt = f"{question} {self.role[1]}: "
             prompt_embed = self.get_text_emb(prompt, device=device, multi=True)
-            object_list_embed, prompt_embed = self.get_object_list_embed(
+            object_list_embed, prompt_embed_ = self.get_object_list_embed(
                 quantized_feats[:,i], # [3, 100, 256]
                 proj_object_img_embed[i] if self.add_img_token else None, 
                 proj_scene_embed[i] if self.add_scene_token else None, 
@@ -715,7 +716,7 @@ class Chat3D(nn.Module):
             tmp_prompt = update_caption(tmp_prompt, assigned_ids[i])
             prompt_embed = self.get_text_emb(tmp_prompt, device=device, multi=True)
             # 获取对象特征列表
-            object_list_embed, prompt_embed = self.get_object_list_embed(
+            object_list_embed, prompt_embed_ = self.get_object_list_embed(
                 quantized_feats[:,i], 
                 proj_object_img_embed[i] if self.add_img_token else None, 
                 proj_scene_embed[i] if self.add_scene_token else None, 

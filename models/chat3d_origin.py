@@ -337,8 +337,7 @@ class Chat3D(nn.Module):
             object_list_embed[0::4, :] = selected_objid_embeds
             object_list_embed[1::4, :] = embed_obj[assigned_ids]
             object_list_embed[2::4, :] = embed_scene[assigned_ids]
-            object_list_embed[3::4, :] = embed_img[assigned_ids]
-            return object_list_embed
+            object_list_embed[3::4, :] = embed_img[assigned_ids]            return object_list_embed
         return object_list_embed
 
     def get_min_max_coord(self, xyz, scene_mask):
