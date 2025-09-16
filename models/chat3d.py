@@ -627,51 +627,6 @@ class Chat3D(nn.Module):
         maxs = masked_xyz_max.max(dim=1)[0]
         return mins, maxs
 
-    def self_consistency_generate(self, inputs_embeds, attention_mask=None, num_samples=5, max_new_tokens=50, **generate_kwargs):
-        """
-        使用自一致性方法生成文本
-        
-        Args:
-            inputs_embeds: 输入embedding
-            attention_mask: 注意力掩码
-            num_samples: 采样次数
-            max_new_tokens: 最大新token数
-            **generate_kwargs: 其他生成参数
-            
-        Returns:
-            最一致的答案
-        """
-        samples = []
-        
-        for _ in range(num_samples):
-            with self.maybe_autocast():
-                outputs = self.llama_model.generate(
-                    inputs_embeds=inputs_embeds,
-                    max_new_tokens=self.max_txt_len,
-                    # stopping_criteria=stopping_criteria,
-                    num_beams=5,
-                    # do_sample=True,
-                    min_length=1,
-                    # top_p=0.9,
-                    repetition_penalty=3.0,
-                    length_penalty=1,
-                    temperature=1.0,
-                    customized_mask=attention_mask
-                )
-            
-            # 解码生成的文本
-            output_token = outputs[0]
-            output_text = self.llama_tokenizer.decode(output_token)
-            # 移除结束符号并清理文本
-            output_text = output_text.split(self.end_sym)[0]
-            output_text = output_text.replace('  ', ' ').replace(' .', '.').strip()
-            samples.append(output_text)
-        
-        # 使用Counter统计最一致的答案
-        vote_counts = Counter(samples)
-        # 返回得票最多的答案
-        return vote_counts.most_common(1)[0][0]
-
     def forward_train(self, scene_feat, scene_img_feat, scene_locs, scene_mask, obj_ids, assigned_ids, questions, answers, is_eval=False, **kwargs):
         """3D场景对话模型的训练前向传播
         核心流程:
@@ -856,39 +811,27 @@ class Chat3D(nn.Module):
                 attention_mask = attention_mask[None, None, :, :].expand(1, 1, -1, -1).clone()
                 st, ed = p_0_embed.shape[1], p_0_embed.shape[1] + object_list_embed.shape[1]
                 attention_mask[:, :, st:ed, st:ed] = 1.0
-
-            # 使用自一致性方法生成答案
-            output_text = self.self_consistency_generate(
-                inputs_embeds=wrapped_embed,
-                attention_mask=attention_mask,
-                num_samples=5,
-                max_new_tokens=self.max_txt_len
-            )
             
-            # 恢复caption中的对象ID
+            with self.maybe_autocast():
+                outputs = self.llama_model.generate(
+                    inputs_embeds=wrapped_embed,
+                    max_new_tokens=self.max_txt_len,
+                    # stopping_criteria=stopping_criteria,
+                    num_beams=5,
+                    # do_sample=True,
+                    min_length=1,
+                    # top_p=0.9,
+                    repetition_penalty=3.0,
+                    length_penalty=1,
+                    temperature=1.0,
+                    customized_mask=attention_mask
+                )
+            output_token = outputs[0]
+            output_text = self.llama_tokenizer.decode(output_token)
+            output_text = output_text.split(self.end_sym)[0]
+            output_text = output_text.replace('  ', ' ').replace(' .', '.').strip()
             output_text = recover_caption(output_text, assigned_ids[i].tolist())
             output_texts.append(output_text)
-            
-            # with self.maybe_autocast():
-            #     outputs = self.llama_model.generate(
-            #         inputs_embeds=wrapped_embed,
-            #         max_new_tokens=self.max_txt_len,
-            #         # stopping_criteria=stopping_criteria,
-            #         num_beams=5,
-            #         # do_sample=True,
-            #         min_length=1,
-            #         # top_p=0.9,
-            #         repetition_penalty=3.0,
-            #         length_penalty=1,
-            #         temperature=1.0,
-            #         customized_mask=attention_mask
-            #     )
-            # output_token = outputs[0]
-            # output_text = self.llama_tokenizer.decode(output_token)
-            # output_text = output_text.split(self.end_sym)[0]
-            # output_text = output_text.replace('  ', ' ').replace(' .', '.').strip()
-            # output_text = recover_caption(output_text, assigned_ids[i].tolist())
-            # output_texts.append(output_text)
         return output_texts
 
     def forward(self, **kwargs):
