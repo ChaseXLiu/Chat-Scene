@@ -237,7 +237,7 @@ model = dict(
     max_txt_len=64,
     end_sym="</s>",
     role=("USER", "ASSISTANT"),
-    add_scene_token=True,
+    add_scene_token=False,
     add_img_token=True,
     use_lora=True,
     train_emb=True,
@@ -250,13 +250,6 @@ model = dict(
     fuse_with_id=False,
     use_objid=True,
     use_location_token=False,
-    use_text_multi_scale=True,  # 是否使用多尺度文本表示
-    use_codebook = True,
-    codebook_dim = 256,
-    num_codes = 16,
-    global_codebook_size = 8,
-    local_codebook_size = 16,
-    texture_codebook_size = 8,
 )
 
 lora = dict(
@@ -283,11 +276,10 @@ optimizer = dict(
     max_grad_norm=5,  # requires a positive float, use -1 to disable
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(
-        enable=True,
-        # module_names=["model.embed_tokens"],
-        module_names=["global_codebook", "local_codebook", "texture_codebook"],
-        lr=[5e-4, 5e-4, 5e-4],
-        wd=[0.02, 0.02, 0.02]
+        enable=False,
+        module_names=["model.embed_tokens"],
+        lr=[5e-4],
+        wd=[0.02]
     ),
 )
 
@@ -319,4 +311,4 @@ pretrained_path = ""
 img_projector_path = ""
 
 debug=False
-gpu_num=2
+gpu_num=1

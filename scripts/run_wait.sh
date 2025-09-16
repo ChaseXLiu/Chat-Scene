@@ -4,8 +4,46 @@ echo "PYTHONPATH: ${PYTHONPATH}"
 
 export MASTER_PORT=$((54000 + $RANDOM % 10000))
 export MASTER_ADDR=localhost
+# export CUDA_LAUNCH_BLOCKING=1
+
+# Function to check GPU memory
+check_gpu_memory() {
+    gpu_id=$1
+    free_memory=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i $gpu_id | xargs)
+    echo $free_memory
+}
+
+# Wait for GPU memory to be sufficient
+wait_for_gpu() {
+    while true; do
+        # Check GPU 0 first
+        gpu_0_memory=$(check_gpu_memory 0)
+        if [ "$gpu_0_memory" -gt "23000" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - GPU 0 has sufficient memory: ${gpu_0_memory}MB"
+            export CUDA_VISIBLE_DEVICES=0
+            return
+        fi
+        
+        # Check GPU 1 if GPU 0 doesn't have enough memory
+        gpu_1_memory=$(check_gpu_memory 1)
+        if [ "$gpu_1_memory" -gt "23000" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - GPU 1 has sufficient memory: ${gpu_1_memory}MB"
+            export CUDA_VISIBLE_DEVICES=1
+            return
+        fi
+        
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Neither GPU 0 (${gpu_0_memory}MB) nor GPU 1 (${gpu_1_memory}MB) has sufficient memory. Waiting..."
+        sleep 30
+    done
+}
+
+# Wait for sufficient GPU memory
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting to wait for GPU memory..."
+wait_for_gpu
+echo "$(date '+%Y-%m-%d %H:%M:%S') - GPU memory is sufficient, starting training..."
 
 epoch=3
+# epoch=2
 batch_size=8
 lr=5e-6
 train_emb=True
@@ -29,12 +67,14 @@ use_location_token=False
 
 llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsys--vicuna-7b-v1.5"
 
+# train_tag="scanrefer#scan2cap#scanqa#sqa3d#multi3dref#nr3d_caption#obj_align" 
+
 train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref"
 # val_tag="scanqa#scan2cap#sqa3d#multi3dref"
 val_tag="scanqa#scan2cap#sqa3d"
 
-evaluate=True
-# evaluate=False
+# evaluate=True
+evaluate=False
 
 debug=False
 if [ $debug = "True" ]; then
@@ -51,15 +91,16 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-# pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
-pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20250912_095750_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref__scanqa#scan2cap#sqa3d__chatscene/ckpt_00_27230.pth"
+pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
+# pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20250506_201448_lr5e-6_ep3_scanrefer#multi3dref#nr3d_caption#obj_align__scanrefer#multi3dref__chatscene/ckpt_00_15075.pth"
 
 
 OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
 mkdir -p ${OUTPUT_DIR}
 
-# srun --partition=mozi-S1 --gres=gpu:${gpu_num} --ntasks-per-node=${gpu_num} --kill-on-bad-exit --quotatype=reserved \
-python tasks/train.py \
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting training with nohup..."
+# 使用nohup在后台运行训练脚本，输出日志到train.log文件
+nohup python tasks/train.py \
     "${config}config.py" \
     output_dir "$OUTPUT_DIR" \
     scheduler.epochs "$epoch" \
@@ -91,5 +132,8 @@ python tasks/train.py \
     seed "$seed" \
     model.fuse_with_id "$fuse_with_id" \
     model.llama_model_path "$llama_model_path" \
-    model.use_location_token "$use_location_token"
+    model.use_location_token "$use_location_token" > ${OUTPUT_DIR}/train.log 2>&1 &
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Training started in background with PID $!"
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Check log file at ${OUTPUT_DIR}/train.log for training progress"
 

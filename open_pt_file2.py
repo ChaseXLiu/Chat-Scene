@@ -10,11 +10,13 @@ device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # 加载模型文件
-model_path = "/home/lcx/chat-scene/Chat-Scene/annotations/scannet_mask3d_uni3d_feats.pt"
+# model_path = "/home/lcx/chat-scene/Chat-Scene/annotations/scannet_mask3d_uni3d_feats.pt"
+model_path = "/home/lcx/chat-scene/Chat-Scene/annotations/scannet_train_attributes.pt"
 checkpoint = torch.load(model_path, map_location=device)
 
 # 获取指定键名的张量
-key = "scene0000_00_10"
+# key = "scene0000_00_10"
+key = "scene0191_00"
 if key in checkpoint:
     data = checkpoint[key]
     print(f"\n{key}的详细信息:")
@@ -30,7 +32,7 @@ if key in checkpoint:
             if isinstance(v, torch.Tensor):
                 # 移动张量到指定设备
                 v = v.to(device)
-                print(f"\n子键 '{k}' 的详细信息:")
+                print(f"\n子键 '{k}' 的详细信息:{v}")
                 print(f"形状: {v.shape}")
                 print(f"数据类型: {v.dtype}")
                 print(f"数值统计:")
@@ -40,6 +42,15 @@ if key in checkpoint:
                 print(f"标准差: {v.std().item()}")
             else:
                 print(f"\n子键 '{k}' 的值: {v}")
+                if k == 'objects':
+                    # 查找'table'的索引
+                    table_indices = [i for i, obj in enumerate(v) if obj == 'table']
+                    if table_indices:
+                        print(f"找到'table'的索引: {table_indices}")
+                        # 获取对应的位置信息
+                        if 'locs' in data:
+                            table_locs = data['locs'][table_indices]
+                            print(f"'table'对应的位置信息:\n{table_locs}")
     elif isinstance(data, torch.Tensor):
         # 移动张量到指定设备
         data = data.to(device)

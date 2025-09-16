@@ -2,7 +2,8 @@ import torch
 import os
 
 # 首先打印文件大小信息
-model_path = "/home/lcx/chat-scene/Chat-Scene/annotations/scannet_mask3d_uni3d_feats.pt"
+# model_path = "/home/lcx/chat-scene/Chat-Scene/annotations/scannet_mask3d_uni3d_feats.pt"
+model_path = "/home/lcx/chat-scene/Chat-Scene/annotations/scannet_train_attributes.pt"
 size_mb = os.path.getsize(model_path) / (1024 * 1024)
 print(f"模型文件大小: {size_mb:.2f} MB")
 

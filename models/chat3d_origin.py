@@ -337,7 +337,8 @@ class Chat3D(nn.Module):
             object_list_embed[0::4, :] = selected_objid_embeds
             object_list_embed[1::4, :] = embed_obj[assigned_ids]
             object_list_embed[2::4, :] = embed_scene[assigned_ids]
-            object_list_embed[3::4, :] = embed_img[assigned_ids]            return object_list_embed
+            object_list_embed[3::4, :] = embed_img[assigned_ids]
+            return object_list_embed
         return object_list_embed
 
     def get_min_max_coord(self, xyz, scene_mask):
@@ -384,7 +385,7 @@ class Chat3D(nn.Module):
             prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
-                proj_object_img_embed[i] if self.add_img_token else None, 
+                proj_object_img_embed[i] if self.add_img_token else None,
                 proj_scene_embed[i] if self.add_scene_token else None, 
                 scene_mask[i],
                 obj_ids[i],
@@ -491,7 +492,7 @@ class Chat3D(nn.Module):
             prompt_embed = self.get_text_emb(tmp_prompt, device=device)
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
-                proj_object_img_embed[i] if self.add_img_token else None, 
+                proj_object_img_embed[i] if self.add_img_token else None,
                 proj_scene_embed[i] if self.add_scene_token else None, 
                 scene_mask[i],
                 obj_ids[i],
