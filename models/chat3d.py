@@ -56,186 +56,96 @@ class SpatialRelationAttention(nn.Module):
     对每一对物体{O_i,O_j}，计算它们的欧式距离和角度关系，构建空间关系特征。
     通过空间条件注意力机制，捕获每个实例在整个3D场景中的成对空间关系。
     """
-    def __init__(self, feat_dim=1024, pos_dim=5, num_heads=8, spatial_multihead=True, spatial_attn_fusion='mul'):
+    def __init__(self, feat_dim=1024, pos_dim=5, num_heads=8, 
+                 spatial_multihead=True, alpha=0.5):
         """
-        初始化空间关系注意力模块
-        
         Args:
             feat_dim (int): 物体特征维度
-            pos_dim (int): 位置特征维度，默认为5[sin(θ_h), cos(θ_h), sin(θ_v), cos(θ_v), d_ij]
+            pos_dim (int): 位置特征维度，默认为5 [sinθh, cosθh, sinθv, cosθv, d_ij]
             num_heads (int): 注意力头数
             spatial_multihead (bool): 是否使用多头空间注意力
-            spatial_attn_fusion (str): 空间注意力融合方式 mul add bias
-            融合方式选择：
-                mul 强调空间关系的权重作用，可能适合空间关系主导的场景。
-                add 平衡特征和空间信息，适合混合场景。
-                bias 直接叠加，可能在空间信息较弱时效果更好。
+            alpha (float): 空间偏置的缩放系数
         """
         super(SpatialRelationAttention, self).__init__()
         self.feat_dim = feat_dim
         self.num_heads = num_heads
         self.head_dim = feat_dim // num_heads
         self.spatial_multihead = spatial_multihead
-        self.spatial_attn_fusion = spatial_attn_fusion
-        
-        # 标准Transformer注意力机制参数，用于生成查询（Query）、键（Key）和值（Value），实现标准的多头自注意力机制
+        self.alpha = nn.Parameter(torch.tensor(alpha))  # 可学习参数
+
+        # QKV
         self.w_qs = nn.Linear(feat_dim, feat_dim)
         self.w_ks = nn.Linear(feat_dim, feat_dim)
         self.w_vs = nn.Linear(feat_dim, feat_dim)
-        
-        # 输出线性层和正则化层
+
+        # 输出层
         self.fc = nn.Linear(feat_dim, feat_dim)
         self.dropout = nn.Dropout(p=0.1)
         self.layer_norm = nn.LayerNorm(feat_dim)
-        
-        # 空间注意力头数设置
-        self.spatial_n_head = num_heads if spatial_multihead else 1
-        
-        # 用于计算spatial conditioned attention weight l_i = W_P^T(P_i + O_i)
+
+        # 用于计算 l_i
         self.w_p = nn.Linear(3 + feat_dim, pos_dim, bias=False)
-        
-        # 场景级令牌生成模块
-        # Transformer编码器层
-        self.scene_transformer_layer = nn.TransformerEncoderLayer(
-            d_model=feat_dim, 
-            nhead=num_heads, 
-            dim_feedforward=2048, 
-            dropout=0.1, 
-            batch_first=True
-        )
-        # Transformer编码器
-        self.scene_transformer = nn.TransformerEncoder(self.scene_transformer_layer, num_layers=2)
-        # 最大池化层
-        self.scene_pool = nn.AdaptiveMaxPool1d(1)
-        # 两层MLP
-        self.scene_mlp = nn.Sequential(
-            nn.Linear(feat_dim, feat_dim),
-            nn.ReLU(),
-            nn.Linear(feat_dim, feat_dim)
-        )
         
     def forward(self, objects, positions):
         """
-        前向传播，计算空间关系注意力
-        
         Args:
-            objects (Tensor): 3D物体特征 [batch_size, num_objects, feat_dim]
-            positions (Tensor): 3D物体位置坐标 [batch_size, num_objects, 3] (x, y, z)
-            
-
+            objects: [B, N, D]  物体特征
+            positions: [B, N, 3] 物体坐标
         Returns:
-            enhanced_objects (Tensor): 增强后的物体特征 [batch_size, num_objects, feat_dim]
+            output: [B, N, D] 增强后的物体特征
         """
-        batch_size, num_objects, feat_dim = objects.shape
-        
-        # 保存残差连接
+        B, N, D = objects.shape
         residual = objects
-        
-        # 对查询、键、值进行线性变换并重新排列维度
-        q = einops.rearrange(self.w_qs(objects), 'b l (head k) -> head b l k', head=self.num_heads)# [num_heads, batch_size, num_objects, head_dim]，head_dim = feat_dim / num_heads
-        k = einops.rearrange(self.w_ks(objects), 'b t (head k) -> head b t k', head=self.num_heads)
-        v = einops.rearrange(self.w_vs(objects), 'b t (head v) -> head b t v', head=self.num_heads)
-        
-        # 计算注意力分数，即 Q 和 K 的点积，缩放后得到注意力权重 [num_heads, batch_size, num_objects, num_objects]
-        attn = torch.einsum('hblk,hbtk->hblt', q, k) / np.sqrt(q.shape[-1])
-        
-        # 计算成对关系特征 s_ij = [sin(θ_h), cos(θ_h), sin(θ_v), cos(θ_v), d_ij]
-        # 扩展维度以便计算成对关系
-        pos_expanded_1 = positions.unsqueeze(2)  # [batch_size, num_objects, 1, 3]
-        pos_expanded_2 = positions.unsqueeze(1)  # [batch_size, 1, num_objects, 3]
-        
-        # 计算坐标差值
-        delta = pos_expanded_2 - pos_expanded_1  # [batch_size, num_objects, num_objects, 3]
-        
-        # 计算欧式距离 d_ij = ||C_i - C_j||_2
-        d_ij = torch.norm(delta, dim=-1)  # [batch_size, num_objects, num_objects]
-        
-        # 计算水平角度 θ_h = arctan2((y_j-y_i)/(x_j-x_i))
-        # 注意：需要处理x_j=x_i的情况
-        theta_h = torch.atan2(delta[..., 1], delta[..., 0] + 1e-8)  # [batch_size, num_objects, num_objects]
-        
-        # 计算垂直角度 θ_v = arcsin((z_j-z_i)/d_ij)
-        # 注意：需要处理d_ij=0的情况
-        theta_v = torch.asin(delta[..., 2] / (d_ij + 1e-8))  # [batch_size, num_objects, num_objects]
-        
-        # 构建成对关系特征 s_ij = [sin(θ_h), cos(θ_h), sin(θ_v), cos(θ_v), d_ij]
+
+        # ---- Q, K, V ----
+        q = einops.rearrange(self.w_qs(objects), 'b l (h d) -> h b l d', h=self.num_heads)
+        k = einops.rearrange(self.w_ks(objects), 'b l (h d) -> h b l d', h=self.num_heads)
+        v = einops.rearrange(self.w_vs(objects), 'b l (h d) -> h b l d', h=self.num_heads)
+
+        # ---- 语义 attention logits ----
+        attn_logits = torch.einsum('hblk,hbtk->hblt', q, k) / np.sqrt(q.shape[-1])  
+
+        # ---- 计算 pairwise 空间特征 s_ij ----
+        pos1 = positions.unsqueeze(2)  # [B, N, 1, 3]
+        pos2 = positions.unsqueeze(1)  # [B, 1, N, 3]
+        delta = pos2 - pos1             # [B, N, N, 3]
+
+        d_ij = torch.norm(delta, dim=-1)  # 距离
+        theta_h = torch.atan2(delta[..., 1], delta[..., 0] + 1e-8)
+        theta_v = torch.asin(delta[..., 2] / (d_ij + 1e-8))
+
         s_ij = torch.stack([
             torch.sin(theta_h),
             torch.cos(theta_h),
             torch.sin(theta_v),
             torch.cos(theta_v),
             d_ij
-        ], dim=-1)  # [batch_size, num_objects, num_objects, 5]
-        
-        # 计算spatial conditioned attention weight l_i = W_P^T(P_i + O_i)
-        # 扩展维度以便计算
-        pos_expanded = positions.unsqueeze(2).expand(-1, -1, num_objects, -1)  # [batch_size, num_objects, num_objects, 3]
-        obj_expanded = objects.unsqueeze(1).expand(-1, num_objects, -1, -1)    # [batch_size, num_objects, num_objects, feat_dim]
-        
-        # 拼接位置和物体特征
-        pos_obj_combined = torch.cat([pos_expanded, obj_expanded], dim=-1)     # [batch_size, num_objects, num_objects, pos_dim + feat_dim]
-        
-        # 计算l_i
-        l_i = self.w_p(pos_obj_combined)  # [batch_size, num_objects, num_objects, pos_dim]
-        
-        # 计算w_ij = l_i * s_ij
-        w_ij = torch.sum(l_i * s_ij, dim=-1)  # [batch_size, num_objects, num_objects]
-        
-        # 重新排列维度以匹配注意力矩阵
-        w_ij = w_ij.unsqueeze(0).expand(self.spatial_n_head, -1, -1, -1)  # [spatial_n_head, batch_size, num_objects, num_objects]
-        
-        # 如果不使用多头空间注意力，则复制到所有头
-        if not self.spatial_multihead:
-            w_ij = einops.repeat(w_ij, 'h b l t -> (h nh) b l t', nh=self.num_heads)
-        
-        # 使用sigsoftmax融合函数: w_ij = sigmoid(w_ij) * exp(w_ij^o) / sum(sigmoid(w_il) * exp(w_il^o))
-        # 先计算标准注意力的softmax
-        attn_softmax = torch.softmax(attn, dim=3)  # [num_heads, batch_size, num_objects, num_objects]
-        
-        # 计算sigsoftmax
-        sigmoid_w_ij = torch.sigmoid(w_ij)
-        fused_attn = sigmoid_w_ij * attn_softmax
-        
-        # 归一化
-        fused_attn = fused_attn / (torch.sum(fused_attn, dim=3, keepdim=True) + 1e-8)
-        
-        # 使用融合注意力对值进行加权求和
-        output = torch.einsum('hblt,hbtv->hblv', fused_attn, v)
-        # 重新排列输出维度
-        output = einops.rearrange(output, 'head b l v -> b l (head v)')
-        # 应用线性变换、dropout和层归一化
+        ], dim=-1)  # [B, N, N, 5]
+
+        # ---- l_i ----
+        pos_exp = positions.unsqueeze(2).expand(-1, -1, N, -1)
+        obj_exp = objects.unsqueeze(1).expand(-1, N, -1, -1)
+        pos_obj = torch.cat([pos_exp, obj_exp], dim=-1)  # [B, N, N, 3+D]
+
+        l_i = self.w_p(pos_obj)  # [B, N, N, pos_dim]
+
+        # ---- 空间 logits ----
+        spatial_logits = torch.sum(l_i * s_ij, dim=-1)  # [B, N, N]
+        spatial_logits = spatial_logits.unsqueeze(0).expand(self.num_heads, -1, -1, -1)
+
+        # ---- Add 融合 ----
+        fused_logits = attn_logits + self.alpha * spatial_logits
+        attn = torch.softmax(fused_logits, dim=-1)
+
+        # ---- 加权求和 ----
+        output = torch.einsum('hblt,hbtv->hblv', attn, v)
+        output = einops.rearrange(output, 'h b l d -> b l (h d)')
+
+        # ---- 残差 & Norm ----
         output = self.dropout(self.fc(output))
         output = self.layer_norm(output + residual)
-        # 返回输出
+
         return output
-    
-    def generate_scene_token(self, enhanced_objects):
-        """
-        生成场景级令牌
-        
-        Args:
-            enhanced_objects (Tensor): 增强后的物体特征 [batch_size, num_objects, feat_dim]
-            
-        Returns:
-            scene_token (Tensor): 场景级令牌 [batch_size, feat_dim]
-        """
-        # 通过Transformer编码器处理增强的实例级特征
-        transformed_objects = self.scene_transformer(enhanced_objects)  # [batch_size, num_objects, feat_dim]
-        
-        # 转换维度以适应池化层
-        batch_size, num_objects, feat_dim = transformed_objects.shape
-        transformed_objects = transformed_objects.transpose(1, 2)  # [batch_size, feat_dim, num_objects]
-        
-        # 应用最大池化
-        pooled_objects = self.scene_pool(transformed_objects)  # [batch_size, feat_dim, 1]
-        
-        # 压缩最后一个维度
-        pooled_objects = pooled_objects.squeeze(-1)  # [batch_size, feat_dim]
-        
-        # 通过MLP生成最终的场景级令牌
-        scene_token = self.scene_mlp(pooled_objects)  # [batch_size, feat_dim]
-        
-        return scene_token
 
 class Chat3D(nn.Module):
     """
@@ -389,7 +299,7 @@ class Chat3D(nn.Module):
             pos_dim=5,  # [sin(θ_h), cos(θ_h), sin(θ_v), cos(θ_v), d_ij]
             num_heads=8,
             spatial_multihead=True,
-            spatial_attn_fusion='mul'
+            alpha=0.5
         )
         # self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.scene_dim, nhead=8, dim_feedforward=2048, dropout=0.05, norm_first=True, batch_first=True)
         # self.relation_module = nn.TransformerEncoder(self.encoder_layer, num_layers=config.model.encoder_num_layers)
