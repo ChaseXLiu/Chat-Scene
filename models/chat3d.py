@@ -50,67 +50,42 @@ def print_grad_status(model):
 
 class SpatialRelationAttention(nn.Module):
     """
-    3D空间关系注意力模块（使用标准Transformer机制）
-    
-    对于3D物体{O_1,O_2,...,O_n}，其中心点坐标为{C_1,C_2,...,C_n}。
-    对每一对物体{O_i,O_j}，计算它们的欧式距离和角度关系，构建空间关系特征。
-    通过空间条件注意力机制，捕获每个实例在整个3D场景中的成对空间关系。
+    3D位置嵌入 (POS embedding)
+    - 融合绝对坐标 (x, y, z) 与相对位置关系 (距离+角度)
+    - 输出独立的 position embedding，用于 LLM 输入
     """
-    def __init__(self, feat_dim=1024, pos_dim=5, num_heads=8, 
-                 spatial_multihead=True, alpha=0.5):
+    def __init__(self, pos_dim=5, llama_dim=4096):
         """
         Args:
-            feat_dim (int): 物体特征维度
-            pos_dim (int): 位置特征维度，默认为5 [sinθh, cosθh, sinθv, cosθv, d_ij]
-            num_heads (int): 注意力头数
-            spatial_multihead (bool): 是否使用多头空间注意力
-            alpha (float): 空间偏置的缩放系数
+            pos_dim (int): 相对位置特征维度 (默认5: [sinθh, cosθh, sinθv, cosθv, d_ij])
+            llama_dim (int): 输出维度 (与 LLM 输入对齐, e.g. 4096)
         """
         super(SpatialRelationAttention, self).__init__()
-        self.feat_dim = feat_dim
-        self.num_heads = num_heads
-        self.head_dim = feat_dim // num_heads
-        self.spatial_multihead = spatial_multihead
-        self.alpha = nn.Parameter(torch.tensor(alpha))  # 可学习参数
+        self.pos_dim = pos_dim
+        self.llama_dim = llama_dim
 
-        # QKV
-        self.w_qs = nn.Linear(feat_dim, feat_dim)
-        self.w_ks = nn.Linear(feat_dim, feat_dim)
-        self.w_vs = nn.Linear(feat_dim, feat_dim)
+        # 投影 MLP: [3 (绝对坐标) + pos_dim (聚合相对关系)] -> llama_dim -> llama_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(3 + pos_dim, llama_dim),
+            nn.ReLU(),
+            nn.Linear(llama_dim, llama_dim)
+        )
 
-        # 输出层
-        self.fc = nn.Linear(feat_dim, feat_dim)
-        self.dropout = nn.Dropout(p=0.1)
-        self.layer_norm = nn.LayerNorm(feat_dim)
-
-        # 用于计算 l_i
-        self.w_p = nn.Linear(3 + feat_dim, pos_dim, bias=False)
-        
-    def forward(self, objects, positions):
+    def forward(self, positions):
         """
         Args:
-            objects: [B, N, D]  物体特征
-            positions: [B, N, 3] 物体坐标
+            positions: [B, N, 3] 每个物体的中心坐标
         Returns:
-            output: [B, N, D] 增强后的物体特征
+            pos_emb: [B, N, out_dim] 独立的位置嵌入
         """
-        B, N, D = objects.shape
-        residual = objects
+        B, N, _ = positions.shape
 
-        # ---- Q, K, V ----
-        q = einops.rearrange(self.w_qs(objects), 'b l (h d) -> h b l d', h=self.num_heads)
-        k = einops.rearrange(self.w_ks(objects), 'b l (h d) -> h b l d', h=self.num_heads)
-        v = einops.rearrange(self.w_vs(objects), 'b l (h d) -> h b l d', h=self.num_heads)
+        # ---- 计算 pairwise 相对位置信息 ----
+        pos1 = positions.unsqueeze(2)        # [B, N, 1, 3]
+        pos2 = positions.unsqueeze(1)        # [B, 1, N, 3]
+        delta = pos2 - pos1                  # [B, N, N, 3]
 
-        # ---- 语义 attention logits ----
-        attn_logits = torch.einsum('hblk,hbtk->hblt', q, k) / np.sqrt(q.shape[-1])  
-
-        # ---- 计算 pairwise 空间特征 s_ij ----
-        pos1 = positions.unsqueeze(2)  # [B, N, 1, 3]
-        pos2 = positions.unsqueeze(1)  # [B, 1, N, 3]
-        delta = pos2 - pos1             # [B, N, N, 3]
-
-        d_ij = torch.norm(delta, dim=-1)  # 距离
+        d_ij = torch.norm(delta, dim=-1)     # [B, N, N]
         theta_h = torch.atan2(delta[..., 1], delta[..., 0] + 1e-8)
         theta_v = torch.asin(delta[..., 2] / (d_ij + 1e-8))
 
@@ -120,32 +95,16 @@ class SpatialRelationAttention(nn.Module):
             torch.sin(theta_v),
             torch.cos(theta_v),
             d_ij
-        ], dim=-1)  # [B, N, N, 5]
+        ], dim=-1)   # [B, N, N, 5]
 
-        # ---- l_i ----
-        pos_exp = positions.unsqueeze(2).expand(-1, -1, N, -1)
-        obj_exp = objects.unsqueeze(1).expand(-1, N, -1, -1)
-        pos_obj = torch.cat([pos_exp, obj_exp], dim=-1)  # [B, N, N, 3+D]
+        # ---- 聚合相对信息 ----
+        s_agg = s_ij.sum(dim=2)              # [B, N, 5]
+        # ---- 拼接绝对坐标 + 相对聚合 ----
+        pos_feat = torch.cat([positions, s_agg], dim=-1)  # [B, N, 3+5=8]
+        # ---- 投影到 LLM 维度 ----
+        pos_emb = self.mlp(pos_feat)         # [B, N, out_dim]
+        return pos_emb
 
-        l_i = self.w_p(pos_obj)  # [B, N, N, pos_dim]
-
-        # ---- 空间 logits ----
-        spatial_logits = torch.sum(l_i * s_ij, dim=-1)  # [B, N, N]
-        spatial_logits = spatial_logits.unsqueeze(0).expand(self.num_heads, -1, -1, -1)
-
-        # ---- Add 融合 ----
-        fused_logits = attn_logits + self.alpha * spatial_logits
-        attn = torch.softmax(fused_logits, dim=-1)
-
-        # ---- 加权求和 ----
-        output = torch.einsum('hblt,hbtv->hblv', attn, v)
-        output = einops.rearrange(output, 'h b l d -> b l (h d)')
-
-        # ---- 残差 & Norm ----
-        output = self.dropout(self.fc(output))
-        output = self.layer_norm(output + residual)
-
-        return output
 
 class Chat3D(nn.Module):
     """
@@ -295,11 +254,8 @@ class Chat3D(nn.Module):
         )
         # 初始化空间关系注意力模块
         self.spatial_relation_attention = SpatialRelationAttention(
-            feat_dim=self.input_dim,
             pos_dim=5,  # [sin(θ_h), cos(θ_h), sin(θ_v), cos(θ_v), d_ij]
-            num_heads=8,
-            spatial_multihead=True,
-            alpha=0.5
+            llama_dim=4096
         )
         # self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.scene_dim, nhead=8, dim_feedforward=2048, dropout=0.05, norm_first=True, batch_first=True)
         # self.relation_module = nn.TransformerEncoder(self.encoder_layer, num_layers=config.model.encoder_num_layers)
@@ -558,12 +514,11 @@ class Chat3D(nn.Module):
         device = object_embed.device
         batch_size = object_embed.shape[0]
         # 空间关系注意力
-        object_embed = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3])
-        object_embed = torch.nn.functional.normalize(object_embed, dim=-1)
+        proj_scene_embed = self.spatial_relation_attention(scene_locs[:, :, :3])
+        proj_scene_embed = torch.nn.functional.normalize(proj_scene_embed, dim=-1)
         
         proj_object_embed = self.object_proj(object_embed)
         proj_object_img_embed = self.object_img_proj(object_img_embed)
-        proj_scene_embed = None
 
         input_embed_list, attn_list, target_list = [], [], []
         max_seq_len = 0
@@ -579,7 +534,7 @@ class Chat3D(nn.Module):
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
                 proj_object_img_embed[i] if self.add_img_token else None,
-                proj_scene_embed[i] if self.add_scene_token else None, 
+                proj_scene_embed[i], 
                 scene_mask[i],
                 obj_ids[i],
                 assigned_ids[i]
@@ -680,12 +635,11 @@ class Chat3D(nn.Module):
         device = object_embed.device
         batch_size, obj_num = object_embed.shape[:2]
         # 空间关系注意力
-        object_embed = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3])
-        object_embed = torch.nn.functional.normalize(object_embed, dim=-1)
+        proj_scene_embed = self.spatial_relation_attention(scene_locs[:, :, :3])
+        proj_scene_embed = torch.nn.functional.normalize(proj_scene_embed, dim=-1)
         
         proj_object_embed = self.object_proj(object_embed)
         proj_object_img_embed = self.object_img_proj(object_img_embed)
-        proj_scene_embed = None
 
         output_texts = []
         p_0_embed = self.p_0_embed.to(device).unsqueeze(0)
@@ -700,7 +654,7 @@ class Chat3D(nn.Module):
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
                 proj_object_img_embed[i] if self.add_img_token else None,
-                proj_scene_embed[i] if self.add_scene_token else None, 
+                proj_scene_embed[i], 
                 scene_mask[i],
                 obj_ids[i],
                 assigned_ids[i]
