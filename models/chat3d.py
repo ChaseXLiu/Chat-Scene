@@ -531,6 +531,13 @@ class Chat3D(nn.Module):
             # 构建文本提示
             prompt = f"{question} {self.role[1]}: "
             prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)
+            print(f"prompt_embed shape: {prompt_embed.shape}")
+
+            # 生成指令向量
+            instruction_vector = torch.mean(prompt_embed, dim=0)
+            print(f"instruction_vector shape: {instruction_vector.shape}")
+            # 门控网络计算权重
+            gate_weights = self.feature_gate(instruction_vector) # Shape: [3]
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
