@@ -56,6 +56,7 @@ tag="${train_tag}__${val_tag}__${other_info}"
 
 pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_00_5029.pth"
+# pretrained_path=""
 
 
 OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"

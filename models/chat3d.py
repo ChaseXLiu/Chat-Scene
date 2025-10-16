@@ -496,7 +496,7 @@ class Chat3D(nn.Module):
     def forward_train(self, scene_feat, scene_img_feat, scene_locs, scene_mask, obj_ids, assigned_ids, questions, answers, is_eval=False, **kwargs):
         """3D场景对话模型的训练前向传播
         核心流程:
-        1. 多模态特征编码 → 2. 空间位置处理 → 3. 注意力机制 → 4. 文本生成        
+        1. 多模态特征编码 → 2. 空间位置处理 → 3. 注意力机制 → 4. 文本生成
         参数:
             scene_feat: 3D场景特征 [bs, num_objs, feat_dim]
             scene_img_feat: 2D图像特征 [bs, num_objs, feat_dim]
@@ -511,6 +511,7 @@ class Chat3D(nn.Module):
         """       
         # 获取对象嵌入
         object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
+
         device = object_embed.device
         batch_size = object_embed.shape[0]
         # 空间关系注意力
@@ -603,7 +604,7 @@ class Chat3D(nn.Module):
                 inputs_embeds=input_embeds,
                 attention_mask=attention_mask,
                 return_dict=True,
-                labels=targets,
+                labels=targets, 
                 # label_weights=label_weights
             )
 
@@ -640,7 +641,7 @@ class Chat3D(nn.Module):
         
         proj_object_embed = self.object_proj(object_embed)
         proj_object_img_embed = self.object_img_proj(object_img_embed)
-
+        
         output_texts = []
         p_0_embed = self.p_0_embed.to(device).unsqueeze(0)
         p_1_embed = self.p_1_embed.to(device).unsqueeze(0)

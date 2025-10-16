@@ -43,12 +43,12 @@ wait_for_gpu
 echo "$(date '+%Y-%m-%d %H:%M:%S') - GPU memory is sufficient, starting training..."
 
 epoch=3
-# epoch=2
 batch_size=8
 lr=5e-6
 train_emb=True
 train_img_proj=True
 add_img_token=True
+train_spatial_attn=True
 add_scene_token=False
 no_obj=False
 input_dim=1024 # 1024
@@ -69,9 +69,10 @@ llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsy
 
 # train_tag="scanrefer#scan2cap#scanqa#sqa3d#multi3dref#nr3d_caption#obj_align" 
 
-train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref"
+train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref"
+# train_tag="scanqa"
 # val_tag="scanqa#scan2cap#sqa3d#multi3dref"
-val_tag="scanqa#scan2cap#sqa3d"
+val_tag="scanrefer#scan2cap#scanqa"
 
 # evaluate=True
 evaluate=False

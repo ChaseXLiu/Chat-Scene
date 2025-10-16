@@ -3,3 +3,5 @@ outputs/
 pretrained_models/
 vis/
 Visual-RFT/
+results/
+run_wait.log
