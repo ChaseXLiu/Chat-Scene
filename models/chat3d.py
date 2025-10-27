@@ -123,6 +123,7 @@ class Chat3D(nn.Module):
         self.no_obj = config.model.no_obj
         self.add_scene_token = config.model.add_scene_token
         self.add_img_token = config.model.add_img_token
+        self.train_spatial_attn = config.model.train_spatial_attn
         self.train_emb = config.model.train_emb
         self.train_img_proj = config.model.train_img_proj
         self.input_dim = config.model.input_dim
@@ -252,10 +253,23 @@ class Chat3D(nn.Module):
         self.pos_proj = nn.Sequential(
             nn.Linear(self.pos_dim, self.llama_dim)
         )
+        
         # 初始化空间关系注意力模块
         self.spatial_relation_attention = SpatialRelationAttention(
             pos_dim=5,  # [sin(θ_h), cos(θ_h), sin(θ_v), cos(θ_v), d_ij]
             llama_dim=4096
+        )
+
+        if not self.train_spatial_attn:
+            for p in self.spatial_relation_attention.parameters():
+                p.requires_grad = False
+
+        # 定义动态门控模块
+        self.feature_gate = nn.Sequential(
+            nn.Linear(self.llama_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 3), # 输出3个权重，分别对应3D, 2D, 空间特征
+            nn.Softmax(dim=-1)
         )
         # self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.scene_dim, nhead=8, dim_feedforward=2048, dropout=0.05, norm_first=True, batch_first=True)
         # self.relation_module = nn.TransformerEncoder(self.encoder_layer, num_layers=config.model.encoder_num_layers)
@@ -527,16 +541,41 @@ class Chat3D(nn.Module):
         p_1_embed = self.p_1_embed.to(device)
         object_list_intervals = []
 
+        batch_gate_weights = []
+
         for i, question in enumerate(questions):
             # 构建文本提示
             prompt = f"{question} {self.role[1]}: "
             prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)
-
+            # 生成指令向量
+            instruction_vector = torch.mean(prompt_embed, dim=0)
+            # 门控网络计算权重
+            gate_weights = self.feature_gate(instruction_vector) # Shape: [3]
+            # 收集gate_weights用于日志记录
+            batch_gate_weights.append(gate_weights.detach())
+            # 权重张量需要 unsqueeze 以匹配特征的维度进行广播
+            w_3d = gate_weights[0]
+            w_2d = gate_weights[1]
+            w_spatial = gate_weights[2]
+            
+            # 使用权重缩放特征
+            gated_proj_object_embed = proj_object_embed[i] * w_3d
+            gated_proj_object_img_embed = proj_object_img_embed[i] * w_2d
+            gated_proj_scene_embed = proj_scene_embed[i] * w_spatial
+            
             # 获取对象特征列表
+            # object_list_embed = self.get_object_list_embed(
+            #     proj_object_embed[i], 
+            #     proj_object_img_embed[i] if self.add_img_token else None,
+            #     proj_scene_embed[i], 
+            #     scene_mask[i],
+            #     obj_ids[i],
+            #     assigned_ids[i]
+            # )
             object_list_embed = self.get_object_list_embed(
-                proj_object_embed[i], 
-                proj_object_img_embed[i] if self.add_img_token else None,
-                proj_scene_embed[i], 
+                gated_proj_object_embed, 
+                gated_proj_object_img_embed if self.add_img_token else None,
+                gated_proj_scene_embed, 
                 scene_mask[i],
                 obj_ids[i],
                 assigned_ids[i]
@@ -605,9 +644,9 @@ class Chat3D(nn.Module):
                 inputs_embeds=input_embeds,
                 attention_mask=attention_mask,
                 return_dict=True,
-                labels=targets, 
+                labels=targets,
                 # label_weights=label_weights
-            )
+            ) 
 
         return dict(
             loss=outputs.loss,
@@ -651,12 +690,25 @@ class Chat3D(nn.Module):
             # 构建文本提示
             tmp_prompt = f" {custom_prompt[i]} {self.role[1]}: "
             tmp_prompt = update_caption(tmp_prompt, assigned_ids[i])
-            prompt_embed = self.get_text_emb(tmp_prompt, device=device)                     
+            prompt_embed = self.get_text_emb(tmp_prompt, device=device)
+            # 生成指令向量
+            instruction_vector = torch.mean(prompt_embed.squeeze(0), dim=0)
+            # 门控网络计算权重
+            gate_weights = self.feature_gate(instruction_vector) # Shape: [3]
+            # 权重张量需要 unsqueeze 以匹配特征的维度进行广播
+            w_3d = gate_weights[0]
+            w_2d = gate_weights[1]
+            w_spatial = gate_weights[2]
+            
+            # 使用权重缩放特征
+            gated_proj_object_embed = proj_object_embed[i] * w_3d
+            gated_proj_object_img_embed = proj_object_img_embed[i] * w_2d
+            gated_proj_scene_embed = proj_scene_embed[i] * w_spatial 
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
-                proj_object_embed[i], 
-                proj_object_img_embed[i] if self.add_img_token else None,
-                proj_scene_embed[i], 
+                gated_proj_object_embed, 
+                gated_proj_object_img_embed if self.add_img_token else None,
+                gated_proj_scene_embed, 
                 scene_mask[i],
                 obj_ids[i],
                 assigned_ids[i]

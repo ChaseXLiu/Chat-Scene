@@ -10,9 +10,9 @@ batch_size=8
 lr=5e-6
 train_emb=True
 train_img_proj=True
-add_img_token=True
 train_spatial_attn=True
-add_scene_token=False
+add_img_token=True
+add_scene_token=True
 no_obj=False
 input_dim=1024 # 1024
 bidirection=False
@@ -54,8 +54,9 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
+# pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_00_5029.pth"
+pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251018_135615_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref__scanrefer#scan2cap#scanqa__chatscene/ckpt_00_23902.pth"
 # pretrained_path=""
 
 
