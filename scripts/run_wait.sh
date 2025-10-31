@@ -1,3 +1,4 @@
+# 
 which_python=$(which python)
 export PYTHONPATH=${PYTHONPATH}:${which_python}:.
 echo "PYTHONPATH: ${PYTHONPATH}"
@@ -46,9 +47,9 @@ epoch=3
 batch_size=8
 lr=5e-6
 train_emb=True
-train_img_proj=True
-add_img_token=True
+train_img_proj=False
 train_spatial_attn=True
+add_img_token=False
 add_scene_token=False
 no_obj=False
 input_dim=1024 # 1024
@@ -73,6 +74,7 @@ train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref"
 # train_tag="scanqa"
 # val_tag="scanqa#scan2cap#sqa3d#multi3dref"
 val_tag="scanrefer#scan2cap#scanqa"
+# val_tag="scanqa"
 
 # evaluate=True
 evaluate=False

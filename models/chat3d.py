@@ -66,9 +66,9 @@ class SpatialRelationAttention(nn.Module):
 
         # 投影 MLP: [3 (绝对坐标) + pos_dim (聚合相对关系)] -> llama_dim -> llama_dim
         self.mlp = nn.Sequential(
-            nn.Linear(3 + pos_dim, llama_dim),
+            nn.Linear(3 + pos_dim, 1024),
             nn.ReLU(),
-            nn.Linear(llama_dim, llama_dim)
+            nn.Linear(1024, 1024)
         )
 
     def forward(self, positions):
@@ -103,6 +103,7 @@ class SpatialRelationAttention(nn.Module):
         pos_feat = torch.cat([positions, s_agg], dim=-1)  # [B, N, 3+5=8]
         # ---- 投影到 LLM 维度 ----
         pos_emb = self.mlp(pos_feat)         # [B, N, out_dim]
+        pos_emb = torch.nn.functional.normalize(pos_emb, dim=-1)
         return pos_emb
 
 
@@ -139,8 +140,7 @@ class Chat3D(nn.Module):
         self.use_location_token = config.model.use_location_token
 
         # 空间多层级特征分组配置
-        initial_weights = torch.tensor([0.5, 0.3, 0.2])  # 三层级权重
-        self.multi_scale_weights = nn.Parameter(initial_weights)
+        self.multi_scale_weights = nn.Parameter(torch.ones(3))
 
         self.debug = config.debug
         if not self.debug:
@@ -245,6 +245,11 @@ class Chat3D(nn.Module):
             nn.GELU(),
             nn.Linear(self.llama_dim, self.llama_dim)
         )
+        self.final_fusion_proj = nn.Sequential(
+            nn.Linear(self.input_dim, self.llama_dim),
+            nn.GELU(),
+            nn.Linear(self.llama_dim, self.llama_dim)
+        )
 
         if not self.train_img_proj:
             for p in self.object_img_proj.parameters():
@@ -264,31 +269,14 @@ class Chat3D(nn.Module):
             for p in self.spatial_relation_attention.parameters():
                 p.requires_grad = False
 
-        # 定义动态门控模块
-        self.feature_gate = nn.Sequential(
-            nn.Linear(self.llama_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 3), # 输出3个权重，分别对应3D, 2D, 空间特征
-            nn.Softmax(dim=-1)
+        # 用于特征融合的Cross-Attention层
+        self.feature_fusion_attn = torch.nn.MultiheadAttention(
+            embed_dim=self.input_dim,
+            num_heads=8,
+            batch_first=True  # 确保输入形状为 [bs, seq_len, dim]
         )
-        # self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.scene_dim, nhead=8, dim_feedforward=2048, dropout=0.05, norm_first=True, batch_first=True)
-        # self.relation_module = nn.TransformerEncoder(self.encoder_layer, num_layers=config.model.encoder_num_layers)
-        # self.scene_init_proj = nn.Sequential(
-        #     nn.Linear(self.input_dim, self.scene_dim)
-        # )
-        # self.scene_proj = nn.Sequential(
-        #     nn.Linear(self.scene_dim, self.llama_dim),
-        #     # nn.GELU(),
-        #     # nn.Linear(self.llama_dim, self.llama_dim)
-        # )
-        
-        # if not self.add_scene_token:
-        #     for p in self.relation_module.parameters():
-        #         p.requires_grad = False
-        #     for p in self.scene_init_proj.parameters():
-        #         p.requires_grad = False
-        #     for p in self.scene_proj.parameters():
-        #         p.requires_grad = False
+        # 用于Cross-Attention后的残差连接和归一化
+        self.fusion_norm = torch.nn.LayerNorm(self.input_dim)
                 
         # 加载系统提示模板
         with open(self.system_path, "r") as f:
@@ -358,26 +346,28 @@ class Chat3D(nn.Module):
         img_feat = torch.nn.functional.normalize(img_feat, dim=-1)
 
         # 截取多层级信息
+        # feat_level_x 的形状为 [B, ..., 1024]
         feat_level_1, feat_level_2, feat_level_3 = torch.split(feat, 1024, dim=-1)
 
-        # 创建多层级特征表示
-        multi_scale_feats = []        
-        # 第一个层级
-        multi_scale_feats.append(feat_level_1)
-        # 第二个层级
-        multi_scale_feats.append(feat_level_2)
-        # 第三个层级
-        multi_scale_feats.append(feat_level_3)
+        # 将特征堆叠 (Stack) 在一个新的维度
+        # stacked_feats 的形状变为 [B, ..., 1024, 3]
+        stacked_feats = torch.stack([feat_level_1, feat_level_2, feat_level_3], dim=-1)
 
-        # 确保权重数量与特征数量匹配
-        weights = self.multi_scale_weights[:len(multi_scale_feats)]
-        # 归一化权重
-        norm_weights = F.softmax(weights, dim=0)
-        # 融合多层级特征
-        fused_feat = torch.zeros_like(multi_scale_feats[0])
-        for i, scale_feat in enumerate(multi_scale_feats):
-            fused_feat += norm_weights[i] * scale_feat
-        fused_feat = torch.nn.functional.normalize(fused_feat, dim=-1)
+        # 对可学习的权重应用 softmax
+        # self.multi_scale_weights 是在 __init__ 中定义的 nn.Parameter
+        # norm_weights 形状为 [3]
+        norm_weights = F.softmax(self.multi_scale_weights, dim=0)
+
+        # 向量化加权求和
+        # 我们利用广播机制：
+        #   [B, ..., 1024, 3] * [3]  (自动广播为 [1, ..., 1, 3])
+        # 得到 [B, ..., 1024, 3]，然后沿着最后一个维度 (dim=-1) 求和
+        # 结果 fused_feat 的形状变回 [B, ..., 1024]
+        fused_feat = (stacked_feats * norm_weights).sum(dim=-1)
+
+        # 对融合后的特征进行最终归一化
+        fused_feat = F.normalize(fused_feat, dim=-1)
+        
         return fused_feat, img_feat
 
     @staticmethod
@@ -526,14 +516,46 @@ class Chat3D(nn.Module):
         # 获取对象嵌入
         object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
 
+        proj_scene_embed = None
+
         device = object_embed.device
         batch_size = object_embed.shape[0]
         # 空间关系注意力
-        proj_scene_embed = self.spatial_relation_attention(scene_locs[:, :, :3])
-        proj_scene_embed = torch.nn.functional.normalize(proj_scene_embed, dim=-1)
+        spatial_embed = self.spatial_relation_attention(scene_locs[:, :, :3])
         
-        proj_object_embed = self.object_proj(object_embed)
-        proj_object_img_embed = self.object_img_proj(object_img_embed)
+        
+        # 准备 Q, K, V
+        # Q (Query): 3D特征
+        query_3d = object_embed
+        
+        # K (Key) / V (Value): 2D特征和空间特征拼接
+        # [bs, num_objs, dim] + [bs, num_objs, dim] -> [bs, 2 * num_objs, dim]
+        kv_context = torch.cat([object_img_embed, spatial_embed], dim=1)
+        
+        # 准备 K/V 的 padding mask
+        # scene_mask (有效掩码) 形状为 [bs, num_objs], 假设 1 为有效, 0 为无效
+        # MultiheadAttention 需要的 mask 是：True/1 表示 *无效* (padding)
+        invalid_mask = (scene_mask == 0) # [bs, num_objs]
+        
+        # 将 2D 和 空间特征的 mask 拼接
+        # [bs, num_objs] + [bs, num_objs] -> [bs, 2 * num_objs]
+        kv_padding_mask = torch.cat([invalid_mask, invalid_mask], dim=1)
+        
+        # 执行 Cross-Attention
+        # Q: [bs, num_objs, dim]
+        # K/V: [bs, 2*num_objs, dim]
+        # Mask: [bs, 2*num_objs]
+        # 输出 fused_embed: [bs, num_objs, dim]
+        fused_embed, _ = self.feature_fusion_attn(
+            query=query_3d,
+            key=kv_context,
+            value=kv_context,
+            key_padding_mask=kv_padding_mask
+        )
+        
+        # 添加残差连接和LayerNorm
+        fused_embed = self.fusion_norm(fused_embed + query_3d)
+        proj_fused_embed = self.final_fusion_proj(fused_embed)
 
         input_embed_list, attn_list, target_list = [], [], []
         max_seq_len = 0
@@ -541,41 +563,13 @@ class Chat3D(nn.Module):
         p_1_embed = self.p_1_embed.to(device)
         object_list_intervals = []
 
-        batch_gate_weights = []
-
         for i, question in enumerate(questions):
-            # 构建文本提示
             prompt = f"{question} {self.role[1]}: "
             prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)
-            # 生成指令向量
-            instruction_vector = torch.mean(prompt_embed, dim=0)
-            # 门控网络计算权重
-            gate_weights = self.feature_gate(instruction_vector) # Shape: [3]
-            # 收集gate_weights用于日志记录
-            batch_gate_weights.append(gate_weights.detach())
-            # 权重张量需要 unsqueeze 以匹配特征的维度进行广播
-            w_3d = gate_weights[0]
-            w_2d = gate_weights[1]
-            w_spatial = gate_weights[2]
-            
-            # 使用权重缩放特征
-            gated_proj_object_embed = proj_object_embed[i] * w_3d
-            gated_proj_object_img_embed = proj_object_img_embed[i] * w_2d
-            gated_proj_scene_embed = proj_scene_embed[i] * w_spatial
-            
-            # 获取对象特征列表
-            # object_list_embed = self.get_object_list_embed(
-            #     proj_object_embed[i], 
-            #     proj_object_img_embed[i] if self.add_img_token else None,
-            #     proj_scene_embed[i], 
-            #     scene_mask[i],
-            #     obj_ids[i],
-            #     assigned_ids[i]
-            # )
             object_list_embed = self.get_object_list_embed(
-                gated_proj_object_embed, 
-                gated_proj_object_img_embed if self.add_img_token else None,
-                gated_proj_scene_embed, 
+                proj_fused_embed[i], 
+                None,
+                None, 
                 scene_mask[i],
                 obj_ids[i],
                 assigned_ids[i]
@@ -650,8 +644,8 @@ class Chat3D(nn.Module):
 
         return dict(
             loss=outputs.loss,
-            obj_norm=proj_object_embed.norm(dim=-1).mean().detach().cpu(),
-            obj_img_norm=proj_object_img_embed.norm(dim=-1).mean().detach().cpu(),
+            obj_norm=proj_fused_embed.norm(dim=-1).mean().detach().cpu(),
+            obj_img_norm=object_img_embed.norm(dim=-1).mean().detach().cpu(),
             objid_norm=self.get_objid_embeds().norm(dim=-1).mean().detach().cpu(),
             scene_norm=proj_scene_embed.norm(dim=-1).mean().detach().cpu() if proj_scene_embed is not None else 0.,
             max_seq_len=max_seq_len
@@ -676,39 +670,54 @@ class Chat3D(nn.Module):
         device = object_embed.device
         batch_size, obj_num = object_embed.shape[:2]
         # 空间关系注意力
-        proj_scene_embed = self.spatial_relation_attention(scene_locs[:, :, :3])
-        proj_scene_embed = torch.nn.functional.normalize(proj_scene_embed, dim=-1)
+        spatial_embed = self.spatial_relation_attention(scene_locs[:, :, :3])
         
-        proj_object_embed = self.object_proj(object_embed)
-        proj_object_img_embed = self.object_img_proj(object_img_embed)
+        # 准备 Q, K, V
+        # Q (Query): 3D特征
+        query_3d = object_embed
         
+        # K (Key) / V (Value): 2D特征和空间特征拼接
+        # [bs, num_objs, dim] + [bs, num_objs, dim] -> [bs, 2 * num_objs, dim]
+        kv_context = torch.cat([object_img_embed, spatial_embed], dim=1)
+        
+        # 准备 K/V 的 padding mask
+        # scene_mask (有效掩码) 形状为 [bs, num_objs], 假设 1 为有效, 0 为无效
+        # MultiheadAttention 需要的 mask 是：True/1 表示 *无效* (padding)
+        invalid_mask = (scene_mask == 0) # [bs, num_objs]
+        
+        # 将 2D 和 空间特征的 mask 拼接
+        # [bs, num_objs] + [bs, num_objs] -> [bs, 2 * num_objs]
+        kv_padding_mask = torch.cat([invalid_mask, invalid_mask], dim=1)
+        
+        # 执行 Cross-Attention
+        # Q: [bs, num_objs, dim]
+        # K/V: [bs, 2*num_objs, dim]
+        # Mask: [bs, 2*num_objs]
+        # 输出 fused_embed: [bs, num_objs, dim]
+        fused_embed, _ = self.feature_fusion_attn(
+            query=query_3d,
+            key=kv_context,
+            value=kv_context,
+            key_padding_mask=kv_padding_mask
+        )
+        
+        # 添加残差连接和LayerNorm
+        # (这是标准Transformer操作，推荐使用)
+        fused_embed = self.fusion_norm(fused_embed + query_3d)
+        proj_fused_embed = self.final_fusion_proj(fused_embed)
+
         output_texts = []
         p_0_embed = self.p_0_embed.to(device).unsqueeze(0)
         p_1_embed = self.p_1_embed.to(device).unsqueeze(0)
 
         for i in range(batch_size):
-            # 构建文本提示
             tmp_prompt = f" {custom_prompt[i]} {self.role[1]}: "
             tmp_prompt = update_caption(tmp_prompt, assigned_ids[i])
             prompt_embed = self.get_text_emb(tmp_prompt, device=device)
-            # 生成指令向量
-            instruction_vector = torch.mean(prompt_embed.squeeze(0), dim=0)
-            # 门控网络计算权重
-            gate_weights = self.feature_gate(instruction_vector) # Shape: [3]
-            # 权重张量需要 unsqueeze 以匹配特征的维度进行广播
-            w_3d = gate_weights[0]
-            w_2d = gate_weights[1]
-            w_spatial = gate_weights[2]
-            
-            # 使用权重缩放特征
-            gated_proj_object_embed = proj_object_embed[i] * w_3d
-            gated_proj_object_img_embed = proj_object_img_embed[i] * w_2d
-            gated_proj_scene_embed = proj_scene_embed[i] * w_spatial 
-            # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
-                gated_proj_object_embed, 
-                gated_proj_object_img_embed if self.add_img_token else None,
-                gated_proj_scene_embed, 
+                proj_fused_embed[i], 
+                None,
+                None, 
                 scene_mask[i],
                 obj_ids[i],
                 assigned_ids[i]
