@@ -6,18 +6,18 @@ echo "PYTHONPATH: ${PYTHONPATH}"
 export MASTER_PORT=$((54000 + $RANDOM % 10000))
 export MASTER_ADDR=localhost
 
-epoch=3
+epoch=5
 batch_size=8
 lr=5e-6
 train_emb=True
-train_img_proj=False
+train_img_proj=True
 train_spatial_attn=True
-add_img_token=False
+add_img_token=True
 add_scene_token=False
 no_obj=False
 input_dim=1024 # 1024
 bidirection=False
-different_lr=False
+different_lr=True
 max_obj_num=100
 lora_r=16
 lora_alpha=16
@@ -31,11 +31,12 @@ use_location_token=False
 
 llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsys--vicuna-7b-v1.5"
 
-train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref"
-# train_tag="scanqa"
-# val_tag="scanqa#scan2cap#sqa3d#multi3dref"
-val_tag="scanrefer#scan2cap#scanqa"
-# val_tag="scanqa"
+# train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref"
+# val_tag="scanrefer#multi3dref#scan2cap#scanqa"
+
+train_tag="scanrefer#obj_align#nr3d_caption#scanqa"
+val_tag="scanrefer#scanqa"
+
 
 # evaluate=True
 evaluate=False
@@ -55,7 +56,8 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
+pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251110_200743_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_44052.pth"
+# pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_00_5029.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251018_135615_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref__scanrefer#scan2cap#scanqa__chatscene/ckpt_00_23902.pth"
 # pretrained_path=""

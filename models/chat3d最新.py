@@ -24,8 +24,6 @@ from torch.nn import TransformerDecoderLayer
 import contextlib
 from dataset.base_dataset import update_caption, recover_caption
 
-from .twin_transformer import TwinTransformer
-
 # import visualize_features
 
 logger = logging.getLogger(__name__)
@@ -245,25 +243,6 @@ class Chat3D(nn.Module):
             nn.Linear(self.img_input_dim, self.llama_dim),
             nn.GELU(),
             nn.Linear(self.llama_dim, self.llama_dim)
-        )
-
-        #    从config中获取transformer层数等超参数 (你需要在你的config文件中定义它们)
-        tt_hidden_dim = getattr(config.model, "tt_hidden_dim", 1024)
-        tt_layers = getattr(config.model, "tt_layers", 2) # 示例: 4层
-        tt_heads = getattr(config.model, "tt_heads", 8)   # 示例: 8头
-        tt_intermediate_ratio = getattr(config.model, "tt_intermediate_ratio", 4) # 示例: FFN中间维度比例
-
-        self.twin_transformer = TwinTransformer(
-            input_text_dim=self.llama_dim,      # 文本特征维度
-            input_2d_dim=self.img_input_dim,    # 2D 特征: 原始2D特征维度
-            input_3d_dim=self.input_dim,        # 3D 特征: 原始3D特征维度
-            hidden_size=tt_hidden_dim,         # 内部和输出维度
-            num_hidden_layers=tt_layers,                # Number of layers for text/2D stream
-            num_hidden_layers_twin=tt_layers,           # Number of layers for 3D stream
-            num_attention_heads=tt_heads,             # Number of attention heads
-            intermediate_size=tt_hidden_dim * tt_intermediate_ratio,             # Intermediate size
-            hidden_dropout_prob=0.1,            # Hidden dropout probability
-            attention_probs_dropout_prob=0.1    # Attention dropout probability
         )
 
         if not self.train_img_proj:
@@ -544,8 +523,8 @@ class Chat3D(nn.Module):
         proj_scene_embed = self.spatial_relation_attention(scene_locs[:, :, :3])
         proj_scene_embed = torch.nn.functional.normalize(proj_scene_embed, dim=-1)
         
-        # proj_object_embed = self.object_proj(object_embed)
-        # proj_object_img_embed = self.object_img_proj(object_img_embed)
+        proj_object_embed = self.object_proj(object_embed)
+        proj_object_img_embed = self.object_img_proj(object_img_embed)
 
         input_embed_list, attn_list, target_list = [], [], []
         max_seq_len = 0
@@ -557,46 +536,10 @@ class Chat3D(nn.Module):
             # 构建文本提示
             prompt = f"{question} {self.role[1]}: "
             prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)
-
-            # === START MODIFICATION ===
-            #  **运行TwinTransformer进行融合**
-            
-            # 1. 准备 batch-size=1 的输入
-            features_text_input = prompt_embed.unsqueeze(0)             # [1, L_txt, D_llama]
-            features_2d_input = object_img_embed[i].unsqueeze(0)    # [1, N_obj, D_2d_raw]
-            features_3d_input = object_embed[i].unsqueeze(0)        # [1, N_obj, D_3d_raw]
-            
-            # 2. 准备 attention masks (long-tensor, 1=attend, 0=ignore)
-            mask_text = torch.ones(1, features_text_input.shape[1], device=device, dtype=torch.long)
-            mask_2d = scene_mask[i].unsqueeze(0)                    # [1, N_obj]
-            mask_3d = scene_mask[i].unsqueeze(0)                    # [1, N_obj]
-
-            # 3. 运行 TwinTransformer
-            #      输出: (None, [1, L_txt, D_llama], [1, N_obj, D_llama], [1, N_obj, D_llama])
-            _fused_global, _processed_text, processed_2d, processed_3d = self.twin_transformer(
-                features_text_input,
-                features_2d_input,
-                features_3d_input,
-                attention_mask_text=mask_text,
-                attention_mask_2d=mask_2d,
-                attention_mask_3d=mask_3d
-            )
-            
-            # 4. 移除 batch 维度，得到当前样本的处理后特征
-            proj_object_embed_fused = processed_3d.squeeze(0)     # [N_obj, D_llama]
-            proj_object_img_embed_fused = processed_2d.squeeze(0) # [N_obj, D_llama]
-
-            # [N_obj, 1024] -> [N_obj, 4096]
-            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1)
-            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1)
-            proj_object_embed_fused = self.object_proj(proj_object_embed_fused)
-            proj_object_img_embed_fused = self.object_img_proj(proj_object_img_embed_fused)
-            # === END MODIFICATION ===
-
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
-                proj_object_embed_fused, 
-                proj_object_img_embed_fused if self.add_img_token else None,
+                proj_object_embed[i], 
+                proj_object_img_embed[i] if self.add_img_token else None,
                 proj_scene_embed[i], 
                 scene_mask[i],
                 obj_ids[i],
@@ -670,19 +613,10 @@ class Chat3D(nn.Module):
                 # label_weights=label_weights
             )
 
-        # return dict(
-        #     loss=outputs.loss,
-        #     obj_norm=proj_object_embed.norm(dim=-1).mean().detach().cpu(),
-        #     obj_img_norm=proj_object_img_embed.norm(dim=-1).mean().detach().cpu(),
-        #     objid_norm=self.get_objid_embeds().norm(dim=-1).mean().detach().cpu(),
-        #     scene_norm=proj_scene_embed.norm(dim=-1).mean().detach().cpu() if proj_scene_embed is not None else 0.,
-        #     max_seq_len=max_seq_len
-        # )
-
         return dict(
             loss=outputs.loss,
-            obj_norm=proj_object_embed_fused.norm(dim=-1).mean().detach().cpu(),
-            obj_img_norm=proj_object_img_embed_fused.norm(dim=-1).mean().detach().cpu(),
+            obj_norm=proj_object_embed.norm(dim=-1).mean().detach().cpu(),
+            obj_img_norm=proj_object_img_embed.norm(dim=-1).mean().detach().cpu(),
             objid_norm=self.get_objid_embeds().norm(dim=-1).mean().detach().cpu(),
             scene_norm=proj_scene_embed.norm(dim=-1).mean().detach().cpu() if proj_scene_embed is not None else 0.,
             max_seq_len=max_seq_len
@@ -710,8 +644,8 @@ class Chat3D(nn.Module):
         proj_scene_embed = self.spatial_relation_attention(scene_locs[:, :, :3])
         proj_scene_embed = torch.nn.functional.normalize(proj_scene_embed, dim=-1)
         
-        # proj_object_embed = self.object_proj(object_embed)
-        # proj_object_img_embed = self.object_img_proj(object_img_embed)
+        proj_object_embed = self.object_proj(object_embed)
+        proj_object_img_embed = self.object_img_proj(object_img_embed)
         
         output_texts = []
         p_0_embed = self.p_0_embed.to(device).unsqueeze(0)
@@ -721,46 +655,11 @@ class Chat3D(nn.Module):
             # 构建文本提示
             tmp_prompt = f" {custom_prompt[i]} {self.role[1]}: "
             tmp_prompt = update_caption(tmp_prompt, assigned_ids[i])
-            prompt_embed = self.get_text_emb(tmp_prompt, device=device)   
-
-            # === START MODIFICATION ===
-            # 5. **在这里运行TwinTransformer进行融合**
-            
-            # 1. 准备 batch-size=1 的输入
-            features_text_input = prompt_embed                    # [1, L_txt, D_llama]
-            features_2d_input = object_img_embed[i].unsqueeze(0)    # [1, N_obj, D_2d_raw]
-            features_3d_input = object_embed[i].unsqueeze(0)        # [1, N_obj, D_3d_raw]
-
-            # 2. 准备 attention masks (long-tensor, 1=attend, 0=ignore)
-            mask_text = torch.ones(1, features_text_input.shape[1], device=device, dtype=torch.long)
-            mask_2d = scene_mask[i].unsqueeze(0)                    # [1, N_obj]
-            mask_3d = scene_mask[i].unsqueeze(0)                    # [1, N_obj]
-
-            # 3. 运行 TwinTransformer
-            _fused_global, _processed_text, processed_2d, processed_3d = self.twin_transformer(
-                features_text_input,
-                features_2d_input,
-                features_3d_input,
-                attention_mask_text=mask_text,
-                attention_mask_2d=mask_2d,
-                attention_mask_3d=mask_3d
-            )
-            
-            # 4. 移除 batch 维度，得到当前样本的处理后特征
-            proj_object_embed_fused = processed_3d.squeeze(0)     # [N_obj, D_llama]
-            proj_object_img_embed_fused = processed_2d.squeeze(0) # [N_obj, D_llama]
-
-            # [N_obj, 1024] -> [N_obj, 4096]
-            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1)
-            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1)
-            proj_object_embed_fused = self.object_proj(proj_object_embed_fused)
-            proj_object_img_embed_fused = self.object_img_proj(proj_object_img_embed_fused)
-            # === END MODIFICATION ===
-
+            prompt_embed = self.get_text_emb(tmp_prompt, device=device)                     
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
-                proj_object_embed_fused, 
-                proj_object_img_embed_fused if self.add_img_token else None,
+                proj_object_embed[i], 
+                proj_object_img_embed[i] if self.add_img_token else None,
                 proj_scene_embed[i], 
                 scene_mask[i],
                 obj_ids[i],

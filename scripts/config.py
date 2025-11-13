@@ -269,6 +269,22 @@ lora = dict(
     lora_dropout=0.05
 )
 
+# optimizer = dict(
+#     opt="adamW",
+#     lr=5e-3,
+#     opt_betas=[0.9, 0.999],  # default
+#     weight_decay=0.02,
+#     scaler_enable=False,
+#     max_grad_norm=5,  # requires a positive float, use -1 to disable
+#     # use a different lr for some modules, e.g., larger lr for new modules
+#     different_lr=dict(
+#         enable=False,
+#         module_names=["model.embed_tokens"],
+#         lr=[5e-4],
+#         wd=[0.02]
+#     ),
+# )
+
 optimizer = dict(
     opt="adamW",
     lr=5e-3,
@@ -278,9 +294,9 @@ optimizer = dict(
     max_grad_norm=5,  # requires a positive float, use -1 to disable
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(
-        enable=False,
-        module_names=["model.embed_tokens"],
-        lr=[5e-4],
+        enable=True,
+        module_names=["twin_transformer"],
+        lr=[5e-5],
         wd=[0.02]
     ),
 )

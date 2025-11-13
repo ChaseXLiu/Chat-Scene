@@ -6,3 +6,4 @@ Visual-RFT/
 results/
 gate_weights_logs/
 run_wait.log
+output.log
