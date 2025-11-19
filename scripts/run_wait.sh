@@ -43,7 +43,7 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting to wait for GPU memory..."
 wait_for_gpu
 echo "$(date '+%Y-%m-%d %H:%M:%S') - GPU memory is sufficient, starting training..."
 
-epoch=3
+epoch=15
 batch_size=8
 lr=5e-6
 train_emb=True
@@ -70,11 +70,8 @@ llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsy
 
 # train_tag="scanrefer#scan2cap#scanqa#sqa3d#multi3dref#nr3d_caption#obj_align" 
 
-train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref"
-# train_tag="scanqa"
-# val_tag="scanqa#scan2cap#sqa3d#multi3dref"
-val_tag="scanrefer#multi3dref#scan2cap#scanqa"
-# val_tag="scanqa"
+train_tag="scanrefer#obj_align#nr3d_caption#scanqa"
+val_tag="scanrefer#scanqa"
 
 # evaluate=True
 evaluate=False
@@ -94,8 +91,8 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-pretrained_path=""
-pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20250506_201448_lr5e-6_ep3_scanrefer#multi3dref#nr3d_caption#obj_align__scanrefer#multi3dref__chatscene/ckpt_00_15075.pth"
+pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251110_200743_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_44052.pth"
+# pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20250506_201448_lr5e-6_ep3_scanrefer#multi3dref#nr3d_caption#obj_align__scanrefer#multi3dref__chatscene/ckpt_00_15075.pth"
 
 OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
 mkdir -p ${OUTPUT_DIR}

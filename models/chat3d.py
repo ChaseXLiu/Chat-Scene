@@ -236,16 +236,20 @@ class Chat3D(nn.Module):
             self.llama_model = None
             self.llama_dim = 4096
         
-        self.object_proj = nn.Sequential(
-            nn.Linear(self.input_dim, self.llama_dim),
-            nn.GELU(),
-            nn.Linear(self.llama_dim, self.llama_dim)
-        )
-        self.object_img_proj = nn.Sequential(
-            nn.Linear(self.img_input_dim, self.llama_dim),
-            nn.GELU(),
-            nn.Linear(self.llama_dim, self.llama_dim)
-        )
+        # self.object_proj = nn.Sequential(
+        #     nn.Linear(self.input_dim, self.llama_dim),
+        #     nn.GELU(),
+        #     nn.Linear(self.llama_dim, self.llama_dim)
+        # )
+        # self.object_img_proj = nn.Sequential(
+        #     nn.Linear(self.img_input_dim, self.llama_dim),
+        #     nn.GELU(),
+        #     nn.Linear(self.llama_dim, self.llama_dim)
+        # )
+
+        self.object_proj = nn.Linear(self.input_dim, self.llama_dim)
+        self.object_img_proj = nn.Linear(self.img_input_dim, self.llama_dim)
+        self.scale_factor = 30.0
 
         #    从config中获取transformer层数等超参数 (你需要在你的config文件中定义它们)
         tt_hidden_dim = getattr(config.model, "tt_hidden_dim", 1024)
@@ -587,8 +591,8 @@ class Chat3D(nn.Module):
             proj_object_img_embed_fused = processed_2d.squeeze(0) # [N_obj, D_llama]
 
             # [N_obj, 1024] -> [N_obj, 4096]
-            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1)
-            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1)
+            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1) * self.scale_factor
+            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1) * self.scale_factor
             proj_object_embed_fused = self.object_proj(proj_object_embed_fused)
             proj_object_img_embed_fused = self.object_img_proj(proj_object_img_embed_fused)
             # === END MODIFICATION ===
@@ -751,8 +755,8 @@ class Chat3D(nn.Module):
             proj_object_img_embed_fused = processed_2d.squeeze(0) # [N_obj, D_llama]
 
             # [N_obj, 1024] -> [N_obj, 4096]
-            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1)
-            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1)
+            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1)  * self.scale_factor
+            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1) * self.scale_factor
             proj_object_embed_fused = self.object_proj(proj_object_embed_fused)
             proj_object_img_embed_fused = self.object_img_proj(proj_object_img_embed_fused)
             # === END MODIFICATION ===
