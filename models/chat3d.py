@@ -251,11 +251,10 @@ class Chat3D(nn.Module):
         self.object_img_proj = nn.Linear(self.img_input_dim, self.llama_dim)
         self.scale_factor = 30.0
 
-        #    从config中获取transformer层数等超参数 (你需要在你的config文件中定义它们)
-        tt_hidden_dim = getattr(config.model, "tt_hidden_dim", 1024)
-        tt_layers = getattr(config.model, "tt_layers", 2) # 示例: 4层
-        tt_heads = getattr(config.model, "tt_heads", 8)   # 示例: 8头
-        tt_intermediate_ratio = getattr(config.model, "tt_intermediate_ratio", 4) # 示例: FFN中间维度比例
+        tt_hidden_dim = getattr(config.model, "tt_hidden_dim", 768)
+        tt_layers = getattr(config.model, "tt_layers", 2)
+        tt_heads = getattr(config.model, "tt_heads", 12)
+        tt_intermediate_ratio = getattr(config.model, "tt_intermediate_ratio", 4) # FFN中间维度比例
 
         self.twin_transformer = TwinTransformer(
             input_text_dim=self.llama_dim,      # 文本特征维度
@@ -562,9 +561,7 @@ class Chat3D(nn.Module):
             prompt = f"{question} {self.role[1]}: "
             prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)
 
-            # === START MODIFICATION ===
-            #  **运行TwinTransformer进行融合**
-            
+            # =====================================         
             # 1. 准备 batch-size=1 的输入
             features_text_input = prompt_embed.unsqueeze(0)             # [1, L_txt, D_llama]
             features_2d_input = object_img_embed[i].unsqueeze(0)    # [1, N_obj, D_2d_raw]
@@ -577,15 +574,15 @@ class Chat3D(nn.Module):
 
             # 3. 运行 TwinTransformer
             #      输出: (None, [1, L_txt, D_llama], [1, N_obj, D_llama], [1, N_obj, D_llama])
-            _fused_global, _processed_text, processed_2d, processed_3d = self.twin_transformer(
-                features_text_input,
-                features_2d_input,
-                features_3d_input,
-                attention_mask_text=mask_text,
-                attention_mask_2d=mask_2d,
-                attention_mask_3d=mask_3d
+            processed_2d, processed_3d = self.twin_transformer(
+                features_text = features_text_input,
+                features_2d = features_2d_input,
+                features_3d = features_3d_input,
+                attention_mask_text = mask_text,
+                attention_mask_2d = mask_2d,
+                attention_mask_3d = mask_3d
             )
-            
+
             # 4. 移除 batch 维度，得到当前样本的处理后特征
             proj_object_embed_fused = processed_3d.squeeze(0)     # [N_obj, D_llama]
             proj_object_img_embed_fused = processed_2d.squeeze(0) # [N_obj, D_llama]
@@ -595,7 +592,7 @@ class Chat3D(nn.Module):
             proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1) * self.scale_factor
             proj_object_embed_fused = self.object_proj(proj_object_embed_fused)
             proj_object_img_embed_fused = self.object_img_proj(proj_object_img_embed_fused)
-            # === END MODIFICATION ===
+            # =====================================
 
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
@@ -726,10 +723,8 @@ class Chat3D(nn.Module):
             tmp_prompt = f" {custom_prompt[i]} {self.role[1]}: "
             tmp_prompt = update_caption(tmp_prompt, assigned_ids[i])
             prompt_embed = self.get_text_emb(tmp_prompt, device=device)   
-
-            # === START MODIFICATION ===
-            # 5. **在这里运行TwinTransformer进行融合**
             
+            # =====================================
             # 1. 准备 batch-size=1 的输入
             features_text_input = prompt_embed                    # [1, L_txt, D_llama]
             features_2d_input = object_img_embed[i].unsqueeze(0)    # [1, N_obj, D_2d_raw]
@@ -742,9 +737,9 @@ class Chat3D(nn.Module):
 
             # 3. 运行 TwinTransformer
             _fused_global, _processed_text, processed_2d, processed_3d = self.twin_transformer(
-                features_text_input,
-                features_2d_input,
-                features_3d_input,
+                features_text = features_text_input,
+                features_2d = features_2d_input,
+                features_3d = features_3d_input,
                 attention_mask_text=mask_text,
                 attention_mask_2d=mask_2d,
                 attention_mask_3d=mask_3d
@@ -759,7 +754,7 @@ class Chat3D(nn.Module):
             proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1) * self.scale_factor
             proj_object_embed_fused = self.object_proj(proj_object_embed_fused)
             proj_object_img_embed_fused = self.object_img_proj(proj_object_img_embed_fused)
-            # === END MODIFICATION ===
+            # =====================================
 
             # 获取对象特征列表
             object_list_embed = self.get_object_list_embed(
