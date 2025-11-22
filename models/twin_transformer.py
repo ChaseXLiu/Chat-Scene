@@ -41,6 +41,7 @@ class TwinTransformerEncoder(nn.Module):
         Forward pass for Custom Twin Transformer (2D + 3D)
         
         Args:
+            features_text: [batch_size, seq_len_text, text_dim]
             features_2d: [batch_size, seq_len_2d, 1024]
             features_3d: [batch_size, seq_len_3d, 1024]
             attention_mask_2d: [batch_size, seq_len_2d]
@@ -72,16 +73,14 @@ class TwinTransformerEncoder(nn.Module):
             layer_module_2d = self.layer_2d[i]
             layer_module_3d = self.layer_3d[i]
             
-            # --- Twin-Transformer Fusion Mechanism (BridgeQA Eq. 4) ---
-
-
-            # 2D Stream sees: [2D, 3D]
-            encoder_hidden_states_2d = torch.cat([hidden_states_text, hidden_states_3d], dim=1)
-            encoder_attention_mask_2d = self._concat_masks([attention_mask_text, attention_mask_3d])
+            # --- Twin-Transformer Fusion Mechanism---
+            # 2D Stream sees: [3D, text]
+            encoder_hidden_states_2d = torch.cat([hidden_states_3d, hidden_states_text], dim=1)
+            encoder_attention_mask_2d = self._concat_masks([attention_mask_3d, attention_mask_text])
             
-            # 3D Stream sees: [3D, 2D]
-            encoder_hidden_states_3d = torch.cat([hidden_states_text, hidden_states_2d], dim=1)
-            encoder_attention_mask_3d = self._concat_masks([attention_mask_text, attention_mask_2d])
+            # 3D Stream sees: [2D, text]
+            encoder_hidden_states_3d = torch.cat([hidden_states_2d, hidden_states_text], dim=1)
+            encoder_attention_mask_3d = self._concat_masks([attention_mask_2d, attention_mask_text])
             
             # --- Forward 2D ---
             layer_outputs_2d = layer_module_2d(
@@ -147,7 +146,7 @@ class TwinTransformer(nn.Module):
             attention_probs_dropout_prob=attention_probs_dropout_prob,
         )
         
-        # config.input_text_dim = input_text_dim # 不再需要
+        config.input_text_dim = input_text_dim
         config.input_2d_dim = input_2d_dim
         config.input_3d_dim = input_3d_dim
         config.num_hidden_layers_twin = num_hidden_layers_twin
@@ -157,14 +156,12 @@ class TwinTransformer(nn.Module):
         self.config = config
         self.twin_encoder = TwinTransformerEncoder(config)
         
-    def forward(self, features_2d, features_3d, 
-                attention_mask_2d=None, attention_mask_3d=None,
-                features_text=None, attention_mask_text=None):
+    def forward(self, features_text, features_2d, features_3d, 
+                attention_mask_text=None, attention_mask_2d=None, attention_mask_3d=None):
         """
         Forward pass
-        Note: features_text is removed from active stream processing
         """
         return self.twin_encoder(
-            features_2d, features_3d, 
-            attention_mask_2d, attention_mask_3d
+            features_text, features_2d, features_3d, 
+            attention_mask_text, attention_mask_2d, attention_mask_3d
         )

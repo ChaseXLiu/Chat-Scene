@@ -247,26 +247,28 @@ class Chat3D(nn.Module):
         #     nn.Linear(self.llama_dim, self.llama_dim)
         # )
 
-        self.object_proj = nn.Linear(self.input_dim, self.llama_dim)
-        self.object_img_proj = nn.Linear(self.img_input_dim, self.llama_dim)
-        self.scale_factor = 30.0
+        
 
         tt_hidden_dim = getattr(config.model, "tt_hidden_dim", 768)
         tt_layers = getattr(config.model, "tt_layers", 2)
         tt_heads = getattr(config.model, "tt_heads", 12)
         tt_intermediate_ratio = getattr(config.model, "tt_intermediate_ratio", 4) # FFN中间维度比例
 
+        self.object_proj = nn.Linear(tt_hidden_dim, self.llama_dim)
+        self.object_img_proj = nn.Linear(tt_hidden_dim, self.llama_dim)
+        self.scale_factor = 30.0
+
         self.twin_transformer = TwinTransformer(
-            input_text_dim=self.llama_dim,      # 文本特征维度
-            input_2d_dim=self.img_input_dim,    # 2D 特征: 原始2D特征维度
-            input_3d_dim=self.input_dim,        # 3D 特征: 原始3D特征维度
-            hidden_size=tt_hidden_dim,         # 内部和输出维度
-            num_hidden_layers=tt_layers,                # Number of layers for text/2D stream
-            num_hidden_layers_twin=tt_layers,           # Number of layers for 3D stream
-            num_attention_heads=tt_heads,             # Number of attention heads
-            intermediate_size=tt_hidden_dim * tt_intermediate_ratio,             # Intermediate size
-            hidden_dropout_prob=0.1,            # Hidden dropout probability
-            attention_probs_dropout_prob=0.1    # Attention dropout probability
+            input_text_dim = self.llama_dim,           # 文本特征维度
+            input_2d_dim = self.img_input_dim,         # 2D 特征: 原始2D特征维度
+            input_3d_dim = self.input_dim,             # 3D 特征: 原始3D特征维度
+            hidden_size = tt_hidden_dim,               # 内部和输出维度
+            num_hidden_layers = tt_layers,             # Number of layers for 2D stream
+            num_hidden_layers_twin = tt_layers,        # Number of layers for 3D stream
+            num_attention_heads = tt_heads,            # Number of attention heads
+            intermediate_size = tt_hidden_dim * tt_intermediate_ratio,             # Intermediate size
+            hidden_dropout_prob = 0.1,                 # Hidden dropout probability
+            attention_probs_dropout_prob = 0.1         # Attention dropout probability
         )
 
         if not self.train_img_proj:
@@ -588,8 +590,10 @@ class Chat3D(nn.Module):
             proj_object_img_embed_fused = processed_2d.squeeze(0) # [N_obj, D_llama]
 
             # [N_obj, 1024] -> [N_obj, 4096]
-            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1) * self.scale_factor
-            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1) * self.scale_factor
+            # proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1) * self.scale_factor
+            # proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1) * self.scale_factor
+            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1)
+            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1)
             proj_object_embed_fused = self.object_proj(proj_object_embed_fused)
             proj_object_img_embed_fused = self.object_img_proj(proj_object_img_embed_fused)
             # =====================================
@@ -750,8 +754,10 @@ class Chat3D(nn.Module):
             proj_object_img_embed_fused = processed_2d.squeeze(0) # [N_obj, D_llama]
 
             # [N_obj, 1024] -> [N_obj, 4096]
-            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1)  * self.scale_factor
-            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1) * self.scale_factor
+            # proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1)  * self.scale_factor
+            # proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1) * self.scale_factor
+            proj_object_embed_fused = torch.nn.functional.normalize(proj_object_embed_fused, dim=-1)
+            proj_object_img_embed_fused = torch.nn.functional.normalize(proj_object_img_embed_fused, dim=-1)
             proj_object_embed_fused = self.object_proj(proj_object_embed_fused)
             proj_object_img_embed_fused = self.object_img_proj(proj_object_img_embed_fused)
             # =====================================
