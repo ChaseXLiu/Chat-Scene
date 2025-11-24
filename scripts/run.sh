@@ -6,7 +6,7 @@ echo "PYTHONPATH: ${PYTHONPATH}"
 export MASTER_PORT=$((54000 + $RANDOM % 10000))
 export MASTER_ADDR=localhost
 
-epoch=15
+epoch=10
 batch_size=8
 lr=5e-6
 train_emb=True
@@ -57,6 +57,7 @@ fi
 tag="${train_tag}__${val_tag}__${other_info}"
 
 pretrained_path=""
+# pretrained_path="/data/lcx/chat-scene/outputs/baseline_mini20251122_112917_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_16764.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_00_5029.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251018_135615_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref__scanrefer#scan2cap#scanqa__chatscene/ckpt_00_23902.pth"
@@ -64,7 +65,7 @@ pretrained_path=""
 
 
 # OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
-OUTPUT_DIR=/data/lcx/chat-scene/outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
+OUTPUT_DIR=/data/lcx/chat-scene/outputs/baseline_mini"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
 mkdir -p ${OUTPUT_DIR}
 
 # srun --partition=mozi-S1 --gres=gpu:${gpu_num} --ntasks-per-node=${gpu_num} --kill-on-bad-exit --quotatype=reserved \

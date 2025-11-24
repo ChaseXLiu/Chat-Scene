@@ -91,7 +91,7 @@ def train(
             d.sampler.set_epoch(epoch)
     train_loader = MetaLoader(name2loader=dict(list(zip(media_types, train_loaders))))
 
-    accum_iter = 1
+    accum_iter = 4
     eval_freq = len(train_loader)
 
     optimizer.zero_grad()
@@ -112,7 +112,7 @@ def train(
             scaler.step(optimizer)
             optimizer.zero_grad()
             scaler.update()
-        scheduler.step()
+            scheduler.step()
 
         # logging
         for name in loss_names:
