@@ -1,4 +1,6 @@
 # nohup bash scripts/run.sh > output.log 2>&1 &
+# nohup bash -c "CUDA_VISIBLE_DEVICES=1 bash scripts/run.sh" > output.log 2>&1 &
+# CUDA_VISIBLE_DEVICES=1 bash scripts/run.sh
 which_python=$(which python)
 export PYTHONPATH=${PYTHONPATH}:${which_python}:.
 echo "PYTHONPATH: ${PYTHONPATH}"
@@ -48,7 +50,8 @@ if [ $debug = "True" ]; then
     do_save=False
     other_info="debug"
 else
-    enable_wandb=False
+    enable_wandb=True
+    # enable_wandb=False
     gpu_num=1
     do_save=True
     other_info="chatscene"
@@ -56,16 +59,16 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-pretrained_path=""
+# pretrained_path="/data/lcx/chat-scene/outputs/ours_mini20251125_225919_lr5e-6_ep10_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_16764.pth"
 # pretrained_path="/data/lcx/chat-scene/outputs/baseline_mini20251122_112917_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_16764.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_00_5029.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251018_135615_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref__scanrefer#scan2cap#scanqa__chatscene/ckpt_00_23902.pth"
-# pretrained_path=""
+pretrained_path=""
 
 
 # OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
-OUTPUT_DIR=/data/lcx/chat-scene/outputs/baseline_mini"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
+OUTPUT_DIR=/data/lcx/chat-scene/outputs/ours_mini"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
 mkdir -p ${OUTPUT_DIR}
 
 # srun --partition=mozi-S1 --gres=gpu:${gpu_num} --ntasks-per-node=${gpu_num} --kill-on-bad-exit --quotatype=reserved \

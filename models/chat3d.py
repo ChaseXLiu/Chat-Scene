@@ -290,23 +290,20 @@ class Chat3D(nn.Module):
         tt_hidden_dim = getattr(config.model, "tt_hidden_dim", 768)
         tt_layers = getattr(config.model, "tt_layers", 2)
         tt_heads = getattr(config.model, "tt_heads", 12)
-        tt_intermediate_ratio = getattr(config.model, "tt_intermediate_ratio", 4) # FFN中间维度比例
+        bert_weights_path = "/home/lcx/chat-scene/Chat-Scene/pretrained_models/bert-base-uncased-pytorch_model.bin"
 
         self.object_proj = nn.Linear(tt_hidden_dim, self.llama_dim)
         self.object_img_proj = nn.Linear(tt_hidden_dim, self.llama_dim)
         self.scale_factor = 30.0
 
         self.twin_transformer = TwinTransformer(
-            input_text_dim = self.llama_dim,           # 文本特征维度
             input_2d_dim = self.img_input_dim,         # 2D 特征: 原始2D特征维度
             input_3d_dim = self.input_dim,             # 3D 特征: 原始3D特征维度
             hidden_size = tt_hidden_dim,               # 内部和输出维度
-            num_hidden_layers = tt_layers,             # Number of layers for 2D stream
-            num_hidden_layers_twin = tt_layers,        # Number of layers for 3D stream
+            num_hidden_layers = tt_layers,             # Number of layers
             num_attention_heads = tt_heads,            # Number of attention heads
-            intermediate_size = tt_hidden_dim * tt_intermediate_ratio,             # Intermediate size
             hidden_dropout_prob = 0.1,                 # Hidden dropout probability
-            attention_probs_dropout_prob = 0.1         # Attention dropout probability
+            bert_weights_path = bert_weights_path
         )
 
         if not self.train_img_proj:
@@ -637,10 +634,8 @@ class Chat3D(nn.Module):
 
         # 3. 运行 TwinTransformer
         processed_2d, processed_3d = self.twin_transformer(
-            features_text = features_text_batch,
             features_2d = object_img_embed,
             features_3d = object_embed,
-            attention_mask_text = mask_text_batch,
             attention_mask_2d = scene_mask,
             attention_mask_3d = scene_mask
         )
@@ -658,7 +653,6 @@ class Chat3D(nn.Module):
         max_seq_len = 0
         p_0_embed = self.p_0_embed.to(device)
         p_1_embed = self.p_1_embed.to(device)
-        object_list_intervals = []
 
         for i, question in enumerate(questions):
             # 构建文本提示
@@ -679,8 +673,6 @@ class Chat3D(nn.Module):
                 obj_ids[i],
                 assigned_ids[i]
             )
-            # object_list_embed = nclamp(object_list_embed, min=-0.05, max=0.05)
-            object_list_intervals.append((p_0_embed.shape[0], p_0_embed.shape[0] + object_list_embed.shape[0]))
             # 组合文本和视觉特征
             wrapped_embed = torch.cat([
                 p_0_embed, 
@@ -705,6 +697,7 @@ class Chat3D(nn.Module):
 
             # 构建模型输入
             target = torch.cat([empty_target, answer_target], dim=0)
+
             input_embed = torch.cat([wrapped_embed, to_regress_embed], dim=0)
             attn = torch.cat([wrapped_attn, to_regress_token.attention_mask[0]], dim=0)
             input_embed_list.append(input_embed)
@@ -723,22 +716,6 @@ class Chat3D(nn.Module):
         input_embeds = pad_and_trim(input_embed_list, max_seq_len, batch_first=True, padding_value=0).to(device)
         targets = pad_and_trim(target_list, max_seq_len, batch_first=True, padding_value=-100).to(device)
         attention_mask = pad_and_trim(attn_list, max_seq_len, batch_first=True, padding_value=0).to(device)
-        # 修改注意力掩码生成方式，考虑空间关系
-        if self.bidirection:
-            input_dtype = input_embeds.dtype
-            causal_mask = torch.ones((max_seq_len, max_seq_len), dtype=input_dtype, device=device)
-            causal_mask = torch.tril(causal_mask, diagonal=0)
-            causal_mask = causal_mask[None, None, :, :].expand(input_embeds.shape[0], 1, -1, -1).clone()
-            padding_mask = causal_mask[..., :].eq(1.0) * attention_mask[:, None, None, :].eq(0.0)
-            causal_mask[..., :] = causal_mask[..., :].masked_fill(padding_mask, 0.0)
-            for i in range(causal_mask.shape[0]):
-                st, ed = object_list_intervals[i]
-                causal_mask[i, :, st:ed, st:ed] = 1.0
-            attention_mask = causal_mask
-        
-        # label_weights = torch.ones(self.llama_model.config.vocab_size, device=device)
-        # label_weights[self.objid_start_idx:self.objid_end_idx] = 10
-
         with self.maybe_autocast():
             outputs = self.llama_model(
                 inputs_embeds=input_embeds,
@@ -790,10 +767,8 @@ class Chat3D(nn.Module):
         
         # 运行 TwinTransformer
         processed_2d, processed_3d = self.twin_transformer(
-            features_text=features_text_batch,
             features_2d=object_img_embed,
             features_3d=object_embed,
-            attention_mask_text=mask_text_batch,
             attention_mask_2d=scene_mask,
             attention_mask_3d=scene_mask
         )
@@ -834,15 +809,7 @@ class Chat3D(nn.Module):
                 p_1_embed, 
                 prompt_embed
                 ], dim=1)
-            attention_mask=None
-            if self.bidirection:
-                seq_len = wrapped_embed.shape[1]
-                attention_mask = torch.ones((seq_len, seq_len), dtype=wrapped_embed.dtype, device=device)
-                attention_mask = torch.tril(attention_mask, diagonal=0)
-                attention_mask = attention_mask[None, None, :, :].expand(1, 1, -1, -1).clone()
-                st, ed = p_0_embed.shape[1], p_0_embed.shape[1] + object_list_embed.shape[1]
-                attention_mask[:, :, st:ed, st:ed] = 1.0
-            
+            attention_mask=None     
             with self.maybe_autocast():
                 outputs = self.llama_model.generate(
                     inputs_embeds=wrapped_embed,
@@ -876,8 +843,6 @@ class Chat3D(nn.Module):
         return self.llama_tokenizer(text, return_tensors="pt").input_ids.shape[1]
 
     def maybe_autocast(self, dtype=torch.bfloat16):
-        # if on cpu, don't use autocast
-        # if on gpu, use autocast with dtype if provided, otherwise use torch.float16
         enable_autocast = self.device != torch.device("cpu")
 
         if enable_autocast:

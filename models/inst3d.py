@@ -137,221 +137,236 @@ class FeatureCrossAttention(nn.Module):
         return final_output
     
 # 3D_ISR: spatial condition self-attention1
-# 空间条件自注意力机制类，用于处理3D点云数据的空间关系
+# 这是一个带有空间条件的多头自注意力机制类，用于处理3D场景理解
+# 它扩展了标准的多头注意力，加入了空间位置信息来增强注意力计算
+
 class MultiHeadAttentionSpatial(nn.Module):
     def __init__(
         self, d_model, n_head, dropout=0.1, spatial_multihead=True, spatial_dim=5,
         spatial_attn_fusion='mul',
     ):
-        # 调用父类初始化方法
         super().__init__()
-        # 确保模型维度能被头数整除
+        # 确保模型维度能够被头数整除
         assert d_model % n_head == 0, 'd_model: %d, n_head: %d' %(d_model, n_head)
 
-        # 设置模型参数
-        self.n_head = n_head  # 注意力头数
-        self.d_model = d_model  # 模型维度
-        self.d_per_head = d_model // n_head  # 每个头的维度
-        self.spatial_multihead = spatial_multihead  # 是否使用多头空间注意力
-        self.spatial_dim = spatial_dim  # 空间维度
-        self.spatial_attn_fusion = spatial_attn_fusion  # 空间注意力融合方式
+        # 保存注意力头数和模型维度等参数
+        self.n_head = n_head
+        self.d_model = d_model
+        # 计算每个注意力头的维度
+        self.d_per_head = d_model // n_head
+        # 是否为每个空间维度使用独立的注意力头
+        self.spatial_multihead = spatial_multihead
+        # 空间特征维度
+        self.spatial_dim = spatial_dim
+        # 空间注意力融合方式
+        self.spatial_attn_fusion = spatial_attn_fusion
 
-        # 定义线性变换层，用于查询、键、值的投影
+        # 定义查询、键、值的线性变换层
         self.w_qs = nn.Linear(d_model, d_model)
         self.w_ks = nn.Linear(d_model, d_model)
         self.w_vs = nn.Linear(d_model, d_model)
         
-        # 输出线性层和正则化层
+        # 输出线性变换层
         self.fc = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(p=dropout)  # Dropout层
-        self.layer_norm = nn.LayerNorm(d_model)  # LayerNorm层
+        # Dropout层用于防止过拟合
+        self.dropout = nn.Dropout(p=dropout)
+        # LayerNorm层用于标准化
+        self.layer_norm = nn.LayerNorm(d_model)
 
-        # 空间注意力头数设置
+        # 根据是否使用多头空间注意力设置空间头数
         self.spatial_n_head = n_head if spatial_multihead else 1
-        # 根据不同的融合方式设置不同的线性层
+        # 根据不同的空间注意力融合方式初始化不同的线性层
         if self.spatial_attn_fusion in ['mul', 'bias', 'add']:
-            # 用于位置信息的线性变换
+            # 对于'mul', 'bias', 'add'模式，将空间维度映射到空间头数
             self.pairwise_loc_fc = nn.Linear(spatial_dim, self.spatial_n_head)
         elif self.spatial_attn_fusion == 'ctx':
-            # 上下文相关的线性变换
+            # 对于'ctx'模式，将空间维度映射到模型维度
             self.pairwise_loc_fc = nn.Linear(spatial_dim, d_model)
         elif self.spatial_attn_fusion == 'cond':
-            # 条件相关的线性变换
+            # 对于'cond'模式，将模型维度映射到空间头数*(空间维度+1)
             self.lang_cond_fc = nn.Linear(d_model, self.spatial_n_head * (spatial_dim + 1))
         else:
-            # 不支持的融合方式
+            # 不支持的融合方式抛出异常
             raise NotImplementedError('unsupported spatial_attn_fusion %s' % (self.spatial_attn_fusion))
 
     def forward(self, q, k, v, pairwise_locs, key_padding_mask=None, txt_embeds=None):
         # 保存残差连接
         residual = q
-        # 对查询、键、值进行线性变换并重新排列维度
+        # 对查询进行线性变换并重新排列维度以适应多头注意力
+        # 将(batch, length, d_model)转换为(head, batch, length, d_per_head)
         q = genops.rearrange(self.w_qs(q), 'b l (head k) -> head b l k', head=self.n_head)
+        # 对键进行线性变换并重新排列维度
         k = genops.rearrange(self.w_ks(k), 'b t (head k) -> head b t k', head=self.n_head)
+        # 对值进行线性变换并重新排列维度
         v = genops.rearrange(self.w_vs(v), 'b t (head v) -> head b t v', head=self.n_head)
-        # 计算注意力分数，使用爱因斯坦求和约定
+        # 计算标准的注意力分数: Q*K^T/sqrt(d_k)
         attn = torch.einsum('hblk,hbtk->hblt', q, k) / np.sqrt(q.shape[-1])
 
-        # 根据不同的融合方式计算位置注意力
+        # 根据不同的空间注意力融合方式计算空间注意力
         if self.spatial_attn_fusion in ['mul', 'bias', 'add']:
-            # 通过线性层处理位置信息
+            # 对空间位置信息进行线性变换
             loc_attn = self.pairwise_loc_fc(pairwise_locs)
-            # 重新排列维度以匹配注意力矩阵
+            # 重新排列维度以适应多头注意力
             loc_attn = genops.rearrange(loc_attn, 'b l t h -> h b l t') 
-            # 如果是乘法融合，应用ReLU激活函数
+            # 对于'mul'模式，应用ReLU激活函数
             if self.spatial_attn_fusion == 'mul':
                 loc_attn = F.relu(loc_attn)
-            # 如果不使用多头空间注意力，则复制到所有头
+            # 如果不使用多头空间注意力，复制空间注意力到所有头
             if not self.spatial_multihead:
                 loc_attn = genops.repeat(loc_attn, 'h b l t -> (h nh) b l t', nh=self.n_head)
         elif self.spatial_attn_fusion == 'ctx':
-            # 上下文相关的处理
+            # 对于'ctx'模式，将空间位置信息映射到更高维度
             loc_attn = self.pairwise_loc_fc(pairwise_locs)
             # 重新排列维度
             loc_attn = genops.rearrange(loc_attn, 'b l t (h k) -> h b l t k', h=self.n_head)
-            # 计算查询和位置信息的点积
+            # 计算查询和空间位置信息的点积作为注意力分数
             loc_attn = torch.einsum('hblk,hbltk->hblt', q, loc_attn) / np.sqrt(q.shape[-1])
         elif self.spatial_attn_fusion == 'cond':
-            # 条件相关的处理
-            # 计算空间权重
+            # 对于'cond'模式，通过语言条件生成空间权重
+            # 将残差和文本嵌入结合后进行线性变换
             spatial_weights = self.lang_cond_fc(residual + txt_embeds.unsqueeze(1))
             # 重新排列维度
             spatial_weights = genops.rearrange(spatial_weights, 'b l (h d) -> h b l d', h=self.spatial_n_head, d=self.spatial_dim+1)
-            # 如果空间头数为1，则复制到所有头
+            # 如果只有一个空间头，复制权重到所有头
             if self.spatial_n_head == 1:
                 spatial_weights = genops.repeat(spatial_weights, '1 b l d -> h b l d', h=self.n_head)
-            # 分离偏置项和权重
+            # 提取空间偏置项
             spatial_bias = spatial_weights[..., :1]
+            # 提取空间权重
             spatial_weights = spatial_weights[..., 1:]
-            # 计算位置注意力
+            # 计算空间注意力分数: 权重*位置信息 + 偏置
             loc_attn = torch.einsum('hbld,bltd->hblt', spatial_weights, pairwise_locs) + spatial_bias
             # 应用sigmoid激活函数
             loc_attn = torch.sigmoid(loc_attn)
 
-        # 如果有键填充掩码，则应用掩码
+        # 如果提供了键填充掩码，则应用掩码
         if key_padding_mask is not None:
-            # 扩展掩码以匹配注意力矩阵的维度
+            # 扩展掩码维度以适应多头注意力
             mask = genops.repeat(key_padding_mask, 'b t -> h b l t', h=self.n_head, l=q.size(2))
-            # 将掩码应用于注意力分数
+            # 将标准注意力分数中被掩码的位置设为负无穷
             attn = attn.masked_fill(mask, -np.inf)
-            # 根据融合方式应用不同的掩码策略
+            # 根据不同的融合方式处理空间注意力掩码
             if self.spatial_attn_fusion in ['mul', 'cond']:
+                # 对于'mul'和'cond'模式，将被掩码的位置设为0
                 loc_attn = loc_attn.masked_fill(mask, 0)
             else:
+                # 其他模式将被掩码的位置设为负无穷
                 loc_attn = loc_attn.masked_fill(mask, -np.inf)
 
-        # 根据融合方式计算最终的融合注意力
+        # 根据不同的融合方式合并标准注意力和空间注意力
         if self.spatial_attn_fusion == 'add':
-            # 加法融合：对注意力分数和位置注意力分别进行softmax后求平均
+            # 对于'add'模式，将两个注意力的softmax结果相加后除以2
             fused_attn = (torch.softmax(attn, 3) + torch.softmax(loc_attn, 3)) / 2
         else:
-            # 其他融合方式
+            # 其他模式根据融合方式计算融合注意力
             if self.spatial_attn_fusion in ['mul', 'cond']:
-                # 对数域加法：将位置注意力转换到对数域后与注意力分数相加
+                # 对于'mul'和'cond'模式，使用对数空间注意力加上标准注意力
                 fused_attn = torch.log(torch.clamp(loc_attn, min=1e-6)) + attn
             else:
-                # 直接相加
+                # 其他模式直接相加
                 fused_attn = loc_attn + attn
-            # 对融合后的注意力进行softmax
+            # 对融合后的注意力应用softmax
             fused_attn = torch.softmax(fused_attn, 3)
         
-        # 检查是否有NaN值
+        # 检查融合注意力中是否存在NaN值
         assert torch.sum(torch.isnan(fused_attn) == 0), print(fused_attn)
 
         # 使用融合注意力对值进行加权求和
         output = torch.einsum('hblt,hbtv->hblv', fused_attn, v)
-        # 重新排列输出维度
+        # 重新排列维度以恢复原始形状
         output = genops.rearrange(output, 'head b l v -> b l (head v)')
-        # 应用线性变换、dropout和层归一化
+        # 通过输出线性层和dropout层
         output = self.dropout(self.fc(output))
+        # 添加残差连接并进行层归一化
         output = self.layer_norm(output + residual)
         # 返回输出和融合注意力矩阵
         return output, fused_attn
     
-# Transformer编码器层类
 class TransformerEncoderLayer(nn.Module):
+    # 标准的Transformer编码器层实现
 
     def __init__(
         self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
         activation="relu"
     ):
-        # 调用父类初始化方法
         super().__init__()
-        # 定义自注意力机制
+        # 初始化多头自注意力机制
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        # 前馈网络的实现
-        self.linear1 = nn.Linear(d_model, dim_feedforward)  # 第一个线性层
-        self.dropout = nn.Dropout(dropout)  # Dropout层
-        self.linear2 = nn.Linear(dim_feedforward, d_model)  # 第二个线性层
+        # 实现前馈神经网络
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
 
-        # 归一化层
+        # 初始化层归一化和dropout层
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-        # Dropout层
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-        # 激活函数
+        # 获取激活函数
         self.activation = _get_activation_fn(activation)
 
     def forward(
         self, src, src_mask: Optional[Tensor] = None,# type: ignore
         src_key_padding_mask: Optional[Tensor] = None,# type: ignore
     ):
-        # 第一个归一化层
+        # 预层归一化版本的前向传播
+        # 对输入进行第一层归一化
         src2 = self.norm1(src)
-        # 自注意力计算
+        # 通过自注意力机制
         src2 = self.self_attn(
             src2, src2, value=src2, attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask
         )[0]
-        # 残差连接和dropout
+        # 添加残差连接
         src = src + self.dropout1(src2)
-        # 第二个归一化层
+        # 对结果进行第二层归一化
         src2 = self.norm2(src)
-        # 前馈网络：线性变换 -> 激活函数 -> dropout -> 线性变换
+        # 通过前馈神经网络
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
-        # 残差连接和dropout
+        # 添加残差连接
         src = src + self.dropout2(src2)
-        # 返回处理后的序列
+        # 返回输出
         return src
 
     def forward_post(
         self, src, src_mask: Optional[Tensor] = None,# type: ignore
         src_key_padding_mask: Optional[Tensor] = None,# type: ignore
     ):
-        # 自注意力计算
+        # 后层归一化版本的前向传播
+        # 通过自注意力机制
         src2 = self.self_attn(
             src, src, value=src, attn_mask=src_mask,
             key_padding_mask=src_key_padding_mask
         )[0]
-        # 残差连接和dropout
+        # 添加残差连接
         src = src + self.dropout1(src2)
-        # 第一个归一化层
+        # 第一层归一化
         src = self.norm1(src)
-        # 前馈网络：线性变换 -> 激活函数 -> dropout -> 线性变换
+        # 通过前馈神经网络
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
-        # 残差连接和dropout
+        # 添加残差连接
         src = src + self.dropout2(src2)
-        # 第二个归一化层
+        # 第二层归一化
         src = self.norm2(src)
-        # 返回处理后的序列
+        # 返回输出
         return src
     
 # 3D_ISR: spatial condition self-attention2
-# 空间条件Transformer解码器层，继承自TransformerDecoderLayer
+# 这是一个带有空间条件的Transformer解码器层，继承自标准的Transformer解码器层
+# 它使用了上面定义的MultiHeadAttentionSpatial替代标准的自注意力机制
 class TransformerSpatialDecoderLayer(TransformerDecoderLayer):
     def __init__(
         self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu",
         spatial_multihead=True, spatial_dim=5, spatial_attn_fusion='mul'
     ):
-        # 调用父类初始化方法
+        # 调用父类初始化函数
         super().__init__(
             d_model, nhead, dim_feedforward=dim_feedforward, dropout=dropout, activation=activation
         )
         # 删除父类的自注意力机制
         del self.self_attn
-        # 使用自定义的空间条件自注意力机制
+        # 使用自定义的空间多头注意力机制替换
         self.self_attn = MultiHeadAttentionSpatial(
             d_model, nhead, dropout=dropout, 
             spatial_multihead=spatial_multihead, 
@@ -359,31 +374,58 @@ class TransformerSpatialDecoderLayer(TransformerDecoderLayer):
             spatial_attn_fusion=spatial_attn_fusion,
         )
         
-    # 计算成对位置信息的方法
     def calc_pairwise_locs(self, obj_centers, eps=1e-10, pairwise_rel_type='center'):
-        # 计算对象中心之间的相对位置
+        # 计算对象中心之间的成对位置关系
+        # 通过重复操作创建成对差异矩阵
         pairwise_locs = einops.repeat(obj_centers, 'b l d -> b l 1 d') \
                         - einops.repeat(obj_centers, 'b l d -> b 1 l d')
-        # 计算成对距离
+        # 计算成对欧氏距离
         pairwise_dists = torch.sqrt(torch.sum(pairwise_locs ** 2, 3) + eps)  # (b, l, l)
 
-        # 计算最大距离并进行归一化
+        # 计算最大距离用于归一化
         max_dists = torch.max(pairwise_dists.view(pairwise_dists.size(0), -1), dim=1)[0]
+        # 归一化成对距离
         norm_pairwise_dists = pairwise_dists / einops.repeat(max_dists, 'b -> b 1 1')
 
-        # 计算2D距离
+        # 计算2D平面距离
         pairwise_dists_2d = torch.sqrt(torch.sum(pairwise_locs[..., :2] ** 2, 3) + eps)
-        # 构建包含多种位置信息的张量
+        # 构建包含多种空间关系的特征向量
         pairwise_locs = torch.stack(
-            [norm_pairwise_dists, pairwise_locs[..., 2] / pairwise_dists,
-             pairwise_dists_2d / pairwise_dists, pairwise_locs[..., 1] / pairwise_dists_2d,
-             pairwise_locs[..., 0] / pairwise_dists_2d],
+            [
+                # 1. 归一化的成对欧氏距离
+                # 这是对象之间3D空间距离的归一化值，范围在[0,1]之间
+                # 0表示两个对象在同一位置，1表示两个对象距离最远
+                norm_pairwise_dists, 
+                
+                # 2. Z轴方向的余弦相似度
+                # pairwise_locs[..., 2]是Z轴坐标差值
+                # 除以pairwise_dists（欧氏距离）得到Z轴方向的余弦值
+                # 表示两个对象在Z轴方向的相对关系（上方/下方）
+                pairwise_locs[..., 2] / pairwise_dists,
+                
+                # 3. 2D平面方向的余弦相似度
+                # pairwise_dists_2d是2D平面（X-Y平面）上的距离
+                # 除以pairwise_dists（3D欧氏距离）得到2D平面方向的余弦值
+                # 表示两个对象在2D平面上的相对朝向
+                pairwise_dists_2d / pairwise_dists, 
+                
+                # 4. Y轴方向的余弦相似度
+                # pairwise_locs[..., 1]是Y轴坐标差值
+                # 除以pairwise_dists_2d（2D平面距离）得到Y轴方向的余弦值
+                # 表示两个对象在Y轴方向（前后方向）的相对关系
+                pairwise_locs[..., 1] / pairwise_dists_2d,
+                
+                # 5. X轴方向的余弦相似度
+                # pairwise_locs[..., 0]是X轴坐标差值
+                # 除以pairwise_dists_2d（2D平面距离）得到X轴方向的余弦值
+                # 表示两个对象在X轴方向（左右方向）的相对关系
+                pairwise_locs[..., 0] / pairwise_dists_2d
+            ],
             dim=3
         )
-        # 返回计算得到的位置信息
+        # 返回成对位置特征
         return pairwise_locs
         
-    # 前向传播方法
     def forward(
         self, tgt, memory, tgt_pairwise_locs,
         tgt_mask: Optional[Tensor] = None, # type: ignore
@@ -391,34 +433,35 @@ class TransformerSpatialDecoderLayer(TransformerDecoderLayer):
         tgt_key_padding_mask: Optional[Tensor] = None, # type: ignore
         memory_key_padding_mask: Optional[Tensor] = None, # type: ignore
     ):
+        # 解码器层的前向传播函数
 
-        # 第一个归一化层
+        # 对目标序列进行第一层归一化
         tgt2 = self.norm1(tgt)
-        # 空间条件自注意力计算
+        # 通过自定义的空间多头注意力机制
         tgt2, self_attn_matrices = self.self_attn(
             tgt2, tgt2, tgt2, tgt_pairwise_locs,
             key_padding_mask=tgt_key_padding_mask,
             txt_embeds=memory[:, 0],
         )
-        # 残差连接和dropout
+        # 添加残差连接
         tgt = tgt + self.dropout1(tgt2)
-        # 第二个归一化层
+        # 对结果进行第二层归一化
         tgt2 = self.norm2(tgt)
-        # 多头注意力计算（交叉注意力）
+        # 通过标准的多头注意力机制（交叉注意力）
         tgt2, cross_attn_matrices = self.multihead_attn(
             query=tgt2, key=memory,
             value=memory, attn_mask=memory_mask,
             key_padding_mask=memory_key_padding_mask
         )
-        # 残差连接和dropout
+        # 添加残差连接
         tgt = tgt + self.dropout2(tgt2)
-        # 第三个归一化层
+        # 对结果进行第三层归一化
         tgt2 = self.norm3(tgt)
-        # 前馈网络：线性变换 -> 激活函数 -> dropout -> 线性变换
+        # 通过前馈神经网络
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
-        # 残差连接和dropout
+        # 添加残差连接
         tgt = tgt + self.dropout3(tgt2)
-        # 返回处理后的序列以及自注意力和交叉注意力矩阵
+        # 返回输出以及自注意力和交叉注意力矩阵
         return tgt, self_attn_matrices, cross_attn_matrices
     
 class Inst3D(nn.Module):
@@ -651,9 +694,12 @@ class Inst3D(nn.Module):
     
     @staticmethod
     def get_dist_attention(pos, dist_exp=1):
-        # pos (bs, obj_num, 3)
+        # pos (bs, obj_num, 3): 输入的对象位置坐标，形状为(批次大小, 对象数量, 3D坐标)
+        # 计算对象之间的相对距离: 将位置张量扩展为两个不同维度的张量并相减
         dist = pos.unsqueeze(1) - pos.unsqueeze(2)
+        # 计算曼哈顿距离(绝对值距离)的指定次幂，并沿最后一个维度(坐标轴)求和
         dist = torch.sum(dist.abs()**dist_exp, dim=-1)
+        # 对距离取负值后应用softmax，得到距离注意力权重(距离越近权重越高)
         dist_attn = torch.nn.functional.softmax(-dist, dim=-1)
         return dist_attn
     
@@ -739,33 +785,53 @@ class Inst3D(nn.Module):
 
 
         # add 3D-ISR module
+        # 添加3D-ISR（3D Instance Scene Representation）模块
         if self.add_3d_isr:  
+            # 如果启用了图像标记，则将图像特征投影到对象嵌入空间并融合
             if self.add_img_token:
+                # 将图像嵌入通过投影层转换维度（从768维到1024维）
                 object_img_embed = self.img2obj_proj(object_img_embed) #768->1024
+                # 将图像特征与对象特征相加进行融合
                 object_embed = object_embed + object_img_embed
 
+            # 将对象嵌入通过初始投影层转换维度（从1024维到256维）
             obj_embed = self.scene_init_proj(object_embed) #1024->256
             
+            # 获取场景中对象位置的最小和最大坐标，用于位置编码的归一化
             mins, maxs = self.get_min_max_coord(scene_locs[:, :, :3], scene_mask) 
-            # position awareness
+            # 位置感知：根据对象的3D坐标计算位置嵌入
+            # 使用位置编码器生成位置嵌入向量
             pos_embed = self.pos_embedding(scene_locs[:, :, :3], input_range=[mins, maxs])
+            # 将位置嵌入通过投影层保持维度（256维）
             pos_embed = self.pos_proj(pos_embed) #256->256
-
             
+            
+            # 计算基于距离的注意力权重矩阵
             pos_attn = self.get_dist_attention(scene_locs[:, :, :3])
 
+            # 通过位置注意力加权位置嵌入，得到对象间的位置关系表示
             obj_pos_rel = torch.matmul(pos_attn, pos_embed)
+            # 将初始对象嵌入与位置关系表示相加，得到场景嵌入
             scene_embed =  obj_embed + obj_pos_rel
 
+            # 将初始对象嵌入与位置嵌入相加，得到空间嵌入
             spatial_embed = obj_embed + pos_embed
+            # 创建Transformer空间解码器层实例
             decoder_layer = TransformerSpatialDecoderLayer(self.config.hidden_size, self.config.num_attention_heads,
             dim_feedforward=2048, dropout=0.1, activation='gelu', **kwargs)
+            # 计算对象之间的成对位置关系
             pairwise_locs = decoder_layer.calc_pairwise_locs(
+                # 使用对象的3D坐标和尺寸信息
                 scene_locs[:, :, :3], scene_locs[:, :, 3:], 
+                # 根据配置设置成对关系类型
                 pairwise_rel_type=self.config.pairwise_rel_type
             )
-            scene_embed = decoder_layer(scene_locs,pairwise_locs,spatial_embed,scene_feat)
+            # 通过Transformer解码器层处理场景信息
+            # 注意：这里传入的参数顺序可能有误，根据TransformerSpatialDecoderLayer的定义，应该是(tgt, memory, tgt_pairwise_locs)
+            scene_embed = decoder_layer(scene_locs, pairwise_locs, spatial_embed, scene_feat)
+            # 通过关系模块进一步处理场景嵌入，考虑场景掩码
             scene_embed = self.relation_module(scene_embed, src_key_padding_mask=~scene_mask)
+            # 将场景嵌入投影到更高维度（从256维到4096维）
             proj_scene_embed = self.scene_proj(scene_embed) #256->4096
         
         input_embed_list, attn_list, target_list = [], [], []
@@ -819,8 +885,8 @@ class Inst3D(nn.Module):
             return padded
         
         input_embeds = pad_and_trim(input_embed_list, max_seq_len, batch_first=True, padding_value=0).to(device)
-        attention_mask = pad_and_trim(attn_list, max_seq_len, batch_first=True, padding_value=0).to(device)
         targets = pad_and_trim(target_list, max_seq_len, batch_first=True, padding_value=-100).to(device)
+        attention_mask = pad_and_trim(attn_list, max_seq_len, batch_first=True, padding_value=0).to(device)
 
         
         with self.maybe_autocast():

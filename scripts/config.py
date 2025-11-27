@@ -307,9 +307,9 @@ evaluate = False
 
 # ========================= wandb ==========================
 wandb = dict(
-    enable=False,
-    entity="liuchenxu",  # username or team name to store the runs, see https://docs.wandb.ai/ref/python/init
-    project="Scene-LLM",
+    enable=True,
+    entity="chaseliu-shandong-university-of-science-and-technology",  # username or team name to store the runs, see https://docs.wandb.ai/ref/python/init
+    project="chat-scene",
 )
 dist_url = "env://"
 device = "cuda"

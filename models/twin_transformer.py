@@ -1,167 +1,165 @@
-"""
-Custom Twin-Transformer Module (BridgeQA Style)
-- 2D Stream: Processes 2D features (Conditioned on 2D + 3D context)
-- 3D Stream: Processes 3D features (Conditioned on 3D + 2D context)
-- Consistent with BridgeQA paper: No independent Text Stream in the Twin module.
-"""
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import os
 from transformers import BertConfig
-from .med import BertLayer  # Assuming you have the custom BertLayer from BridgeQA
-
+from .med import BertLayer 
+import torch.utils.checkpoint as checkpoint # 引入 checkpoint 用于节省显存
 
 class TwinTransformerEncoder(nn.Module):
-    """
-    Custom Twin Transformer Encoder that processes 2D and 3D features in parallel streams.
-    Implements the 'Twin' fusion: each stream attends to the concatenation of both streams.
-    """
-    
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.hidden_size = config.hidden_size
-        self.num_hidden_layers = config.num_hidden_layers
-        self.num_hidden_layers_twin = getattr(config, 'num_hidden_layers_twin', config.num_hidden_layers)
+        self.num_layers = config.num_hidden_layers 
+        self.gradient_checkpointing = False # 如果显存不够(OOM)，可以在外部设为 True
         
-        # 2D stream layers
-        self.layer_2d = nn.ModuleList([BertLayer(config, i) for i in range(self.num_hidden_layers)])
+        self.layer_2d = nn.ModuleList([BertLayer(config, i) for i in range(self.num_layers)])
+        self.layer_3d = nn.ModuleList([BertLayer(config, i) for i in range(self.num_layers)])
         
-        # 3D stream layers (twin layers)
-        self.layer_3d = nn.ModuleList([BertLayer(config, i) for i in range(self.num_hidden_layers_twin)])
-        
-        # Feature adapters to convert input features to hidden size
-        self.adapter_text = nn.Linear(config.input_text_dim, config.hidden_size)
+        # Feature adapters
         self.adapter_2d = nn.Linear(config.input_2d_dim, config.hidden_size)
         self.adapter_3d = nn.Linear(config.input_3d_dim, config.hidden_size)
         
-    def forward(self, features_text, features_2d, features_3d, attention_mask_text=None, attention_mask_2d=None, attention_mask_3d=None):
-        """
-        Forward pass for Custom Twin Transformer (2D + 3D)
-        
-        Args:
-            features_text: [batch_size, seq_len_text, text_dim]
-            features_2d: [batch_size, seq_len_2d, 1024]
-            features_3d: [batch_size, seq_len_3d, 1024]
-            attention_mask_2d: [batch_size, seq_len_2d]
-            attention_mask_3d: [batch_size, seq_len_3d]
-            features_text: Optional, kept for compatibility but not used in Twin loop by default
-            
-        Returns:
-            features_2d_out: [batch_size, seq_len_2d, hidden_size]
-            features_3d_out: [batch_size, seq_len_3d, hidden_size]
-        """
-        # Adapt input features to hidden size
-        hidden_states_text = self.adapter_text(features_text) # [B, L_text, H]
-        hidden_states_2d = self.adapter_2d(features_2d)       # [B, L_2d, H]
-        hidden_states_3d = self.adapter_3d(features_3d)       # [B, L_3d, H]
-        
-        # Prepare attention masks
-        if attention_mask_text is not None:
-            attention_mask_text = self._prepare_attention_mask(attention_mask_text, hidden_states_text.device)
+        # Pre-LayerNorm 
+        self.ln_2d = nn.LayerNorm(config.hidden_size)
+        self.ln_3d = nn.LayerNorm(config.hidden_size)
 
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.adapter_2d.weight)
+        nn.init.zeros_(self.adapter_2d.bias)
+        nn.init.xavier_uniform_(self.adapter_3d.weight)
+        nn.init.zeros_(self.adapter_3d.bias)
+
+    def forward(self, features_2d, features_3d, attention_mask_2d=None, attention_mask_3d=None):            
+        # 1. Adapt & Norm
+        hidden_states_2d = self.ln_2d(self.adapter_2d(features_2d)) 
+        hidden_states_3d = self.ln_3d(self.adapter_3d(features_3d)) 
+        
+        # 2. Prepare masks
         if attention_mask_2d is not None:
-            attention_mask_2d = self._prepare_attention_mask(attention_mask_2d, hidden_states_2d.device)
+            extended_mask_2d = self._prepare_attention_mask(attention_mask_2d, hidden_states_2d)
+        else:
+            extended_mask_2d = None
             
         if attention_mask_3d is not None:
-            attention_mask_3d = self._prepare_attention_mask(attention_mask_3d, hidden_states_2d.device)
+            extended_mask_3d = self._prepare_attention_mask(attention_mask_3d, hidden_states_3d)
+        else:
+            extended_mask_3d = None
             
-        # Process through twin transformer layers
-        for i in range(min(self.num_hidden_layers, self.num_hidden_layers_twin)):
-            # Get layer modules
+        # 3. Twin Loop
+        for i in range(self.num_layers):
             layer_module_2d = self.layer_2d[i]
             layer_module_3d = self.layer_3d[i]
             
-            # --- Twin-Transformer Fusion Mechanism---
-            # 2D Stream sees: [3D, text]
-            encoder_hidden_states_2d = torch.cat([hidden_states_3d, hidden_states_text], dim=1)
-            encoder_attention_mask_2d = self._concat_masks([attention_mask_3d, attention_mask_text])
+            # 【关键修改】保存当前层之前的状态，确保双流是对称交互的
+            prev_hidden_states_2d = hidden_states_2d
+            prev_hidden_states_3d = hidden_states_3d
+
+            def run_layer(module, hidden_states, attention_mask, encoder_hidden, encoder_mask):
+                return module(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    encoder_hidden_states=encoder_hidden,
+                    encoder_attention_mask=encoder_mask,
+                    mode='multimodal'
+                )[0]
+
+            # --- 2D Stream ---
+            # 使用 gradient_checkpointing 节省 RTX 3090 显存
+            if self.training and self.gradient_checkpointing:
+                new_hidden_states_2d = checkpoint.checkpoint(
+                    run_layer, layer_module_2d, prev_hidden_states_2d, extended_mask_2d, prev_hidden_states_3d, extended_mask_3d
+                )
+            else:
+                new_hidden_states_2d = run_layer(
+                    layer_module_2d, prev_hidden_states_2d, extended_mask_2d, prev_hidden_states_3d, extended_mask_3d
+                )
+
+            # --- 3D Stream ---
+            # 注意：CrossAttention 的 Key/Value 输入必须是 prev_hidden_states_2d (未经本层更新的)
+            if self.training and self.gradient_checkpointing:
+                new_hidden_states_3d = checkpoint.checkpoint(
+                    run_layer, layer_module_3d, prev_hidden_states_3d, extended_mask_3d, prev_hidden_states_2d, extended_mask_2d
+                )
+            else:
+                new_hidden_states_3d = run_layer(
+                    layer_module_3d, prev_hidden_states_3d, extended_mask_3d, prev_hidden_states_2d, extended_mask_2d
+                )
             
-            # 3D Stream sees: [2D, text]
-            encoder_hidden_states_3d = torch.cat([hidden_states_2d, hidden_states_text], dim=1)
-            encoder_attention_mask_3d = self._concat_masks([attention_mask_2d, attention_mask_text])
-            
-            # --- Forward 2D ---
-            layer_outputs_2d = layer_module_2d(
-                hidden_states_2d,
-                attention_mask=attention_mask_2d,
-                encoder_hidden_states=encoder_hidden_states_2d, # K, V = text + 3D
-                encoder_attention_mask=encoder_attention_mask_2d,
-                mode='multimodal'
-            )
-            hidden_states_2d = layer_outputs_2d[0]
-            
-            # --- Forward 3D ---
-            layer_outputs_3d = layer_module_3d(
-                hidden_states_3d,
-                attention_mask=attention_mask_3d,
-                encoder_hidden_states=encoder_hidden_states_3d, # K, V = text + 2D
-                encoder_attention_mask=encoder_attention_mask_3d,
-                mode='multimodal'
-            )
-            hidden_states_3d = layer_outputs_3d[0]
+            # 更新状态
+            hidden_states_2d = new_hidden_states_2d
+            hidden_states_3d = new_hidden_states_3d
             
         return hidden_states_2d, hidden_states_3d
-    
-    def _prepare_attention_mask(self, attention_mask, device):
-        """将 [B, L] 掩码转换为 [B, 1, 1, L] 并且反转"""
+
+    def _prepare_attention_mask(self, attention_mask, input_tensor):
         if attention_mask.dim() == 4:
             return attention_mask 
-        extended_attention_mask = attention_mask.to(dtype=torch.float32)
+        # 跟随输入 tensor 的类型 (fp16/fp32) 和设备
+        extended_attention_mask = attention_mask.to(dtype=input_tensor.dtype, device=input_tensor.device)
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
-        return extended_attention_mask.unsqueeze(1).unsqueeze(2).to(device)
-
-    def _concat_masks(self, mask_list):
-        """安全地拼接多个掩码"""
-        valid_masks = [m for m in mask_list if m is not None]
-        if not valid_masks:
-            return None
-        return torch.cat(valid_masks, dim=-1)
+        return extended_attention_mask.unsqueeze(1).unsqueeze(2)
 
 
 class TwinTransformer(nn.Module):
-    """Complete Custom Twin Transformer module for 2D-3D feature fusion"""
-    
     def __init__(self, 
-                 input_text_dim=768,   # Keeping config args for compatibility
                  input_2d_dim=1024,    
                  input_3d_dim=1024,    
-                 hidden_size=768,      
-                 num_hidden_layers=6,  
-                 num_hidden_layers_twin=6,  
+                 hidden_size=768,       
+                 num_hidden_layers=2,
                  num_attention_heads=12,
-                 intermediate_size=3072,
                  hidden_dropout_prob=0.1,
-                 attention_probs_dropout_prob=0.1):
+                 bert_weights_path=None):              
         super().__init__()
         
-        # Create config for transformer
         config = BertConfig(
             hidden_size=hidden_size,
             num_hidden_layers=num_hidden_layers,
             num_attention_heads=num_attention_heads,
-            intermediate_size=intermediate_size,
+            intermediate_size=hidden_size * 4,
             hidden_dropout_prob=hidden_dropout_prob,
-            attention_probs_dropout_prob=attention_probs_dropout_prob,
+            attention_probs_dropout_prob=hidden_dropout_prob,
         )
         
-        config.input_text_dim = input_text_dim
         config.input_2d_dim = input_2d_dim
         config.input_3d_dim = input_3d_dim
-        config.num_hidden_layers_twin = num_hidden_layers_twin
+        
+        # 必须开启 cross attention
+        config.add_cross_attention = True
+        # 必须设置 encoder_width 等于 hidden_size，因为用了 Adapter
         config.encoder_width = hidden_size
-        config.add_cross_attention = True 
+        config.chunk_size_feed_forward = 0
+        config.output_attentions = False
         
-        self.config = config
         self.twin_encoder = TwinTransformerEncoder(config)
+
+        self.load_bert_weights(bert_weights_path)
+
+    def load_bert_weights(self, weight_path):
+        if not os.path.exists(weight_path):
+            print(f"Warning: BERT weight file not found at {weight_path}. Using random init.")
+            return
+
+        print(f"Loading BERT weights from {weight_path}...")
+        # map_location='cpu' 保证在任何环境下都能读
+        bert_state_dict = torch.load(weight_path, map_location='cpu')
         
-    def forward(self, features_text, features_2d, features_3d, 
-                attention_mask_text=None, attention_mask_2d=None, attention_mask_3d=None):
-        """
-        Forward pass
-        """
-        return self.twin_encoder(
-            features_text, features_2d, features_3d, 
-            attention_mask_text, attention_mask_2d, attention_mask_3d
-        )
+        num_layers = len(self.twin_encoder.layer_2d)
+        
+        for i in range(num_layers):
+            prefix = f"bert.encoder.layer.{i}."
+            layer_state_dict = {}
+            for key, value in bert_state_dict.items():
+                if key.startswith(prefix):
+                    new_key = key[len(prefix):]
+                    layer_state_dict[new_key] = value
+            
+            # strict=False 忽略不匹配的键 (如 LayerNorms)
+            self.twin_encoder.layer_2d[i].load_state_dict(layer_state_dict, strict=False)
+            self.twin_encoder.layer_3d[i].load_state_dict(layer_state_dict, strict=False)
+            
+        print(f"Successfully initialized first {num_layers} layers from BERT.")
+        
+    def forward(self, features_2d, features_3d, attention_mask_2d=None, attention_mask_3d=None):
+        return self.twin_encoder(features_2d, features_3d, attention_mask_2d, attention_mask_3d)
