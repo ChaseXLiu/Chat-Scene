@@ -1,5 +1,5 @@
 # ========================= data ==========================
-anno_root = "/home/lcx/chat-scene/Chat-Scene/annotations"  # annotation dir
+anno_root = "/data/lcx/chat-scene/annotations"  # annotation dir
 pc_encoder = "uni3d"
 segmentor = "mask3d"
 version = "_mini_20pct" # 使用 20% 数据集快速验证
@@ -15,6 +15,8 @@ gt_val_attr_file = f"{anno_root}/scannet_val_attributes.pt"
 seg_train_attr_file = f"{anno_root}/scannet_{segmentor}_train_attributes.pt"
 seg_val_attr_file = f"{anno_root}/scannet_{segmentor}_val_attributes.pt"
 seg_all_attr_file = f"{anno_root}/scannet_{segmentor}_all_attributes.pt"
+seg_text_feat_file = f"{anno_root}/scannet_{segmentor}_obj_textfeat.pt"
+description_file = f"{anno_root}/object_descriptions_with_obj_tags.json" 
 
 train_tag = 'scanrefer#multi3dref#nr3d'
 val_tag = 'scanrefer#multi3dref#nr3d'
@@ -115,7 +117,13 @@ train_file_dict = {
         seg_img_feat_file,
         seg_train_attr_file,
         f"{anno_root}/scannet_region_caption_{segmentor}_train{version}.json",
-    ]
+    ],
+    'object_descriptions': [
+        seg_feat_file,
+        seg_img_feat_file,
+        seg_train_attr_file,
+        f"{anno_root}/object_descriptions_with_obj_tags{version}.json",
+    ],
 }
 
 val_file_dict = {
@@ -233,7 +241,6 @@ model = dict(
     encoder_num_layers=3,
     low_resource=False,
     system_path="prompts/system.txt",
-    # system_path="prompts/system_rft.txt",
     instruction_path="prompts/instruction.txt",
     max_txt_len=64,
     end_sym="</s>",

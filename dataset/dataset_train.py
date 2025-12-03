@@ -1,7 +1,7 @@
 import logging
 import os
 import json
-
+import re
 import numpy as np
 import torch
 
@@ -13,7 +13,24 @@ from torch.nn.utils.rnn import pad_sequence
 
 logger = logging.getLogger(__name__)
 
+OBJ_TAG_RE = re.compile(r"<OBJ(\d{1,3})>")
 
+def _shorten_desc(desc: str, max_words: int = 10) -> str:
+    if not desc:
+        return ""
+    t = desc.strip()
+    t = re.split(r"[.;]\s*", t)[0]
+    t = re.sub(r"\b(is|are)\s+(located|situated|positioned)\b", "is", t, flags=re.I)
+    t = re.sub(r"\b(which is|that is)\b", "", t, flags=re.I)
+    t = re.sub(r"\b(in the room|in the background)\b", "", t, flags=re.I)
+    t = re.sub(r"\s{2,}", " ", t)
+    words = t.split()
+    if len(words) > max_words:
+        t = " ".join(words[:max_words]) + " …"
+    return t.strip()
+
+def _mentioned_ids(text: str):
+    return [int(m.group(1)) for m in OBJ_TAG_RE.finditer(text)]
 
 class TrainDataset(BaseDataset):
 
@@ -26,8 +43,25 @@ class TrainDataset(BaseDataset):
         self.max_obj_num = config.model.max_obj_num
 
         feat_file, img_feat_file, attribute_file, anno_file = ann_list[:4]
+
         self.attributes = torch.load(attribute_file, map_location='cpu') if attribute_file is not None else None
         self.anno = json.load(open(anno_file, 'r'))
+
+        desc_file = config.get("description_file", None)
+        self.max_desc = config.get("max_prompt_descriptions", 1)
+        self.description_map = {}
+
+        if desc_file and os.path.exists(desc_file):
+            with open(desc_file, "r") as f:
+                data = json.load(f)
+                for entry in data:
+                    scene_id = entry["scene_id"]
+                    obj_id = int(entry["object_id"])
+                    name = entry["object_name"]
+                    desc = entry["object_description"].strip()
+                    if scene_id not in self.description_map:
+                        self.description_map[scene_id] = {}
+                    self.description_map[scene_id][obj_id] = (name, desc)
 
         if len(ann_list) > 4:
             sample_ratio = ann_list[-1]
@@ -60,20 +94,48 @@ class TrainDataset(BaseDataset):
 
     def __getitem__(self, index):
         if self.attributes is not None and self.anno[index]['scene_id'] not in self.attributes:
-            # print(f"{self.anno[index]['scene_id']} not in attribute file!")
             return self.__getitem__(random.randint(0, len(self.anno)-1))
-        if "obj_id" in self.anno[index]:
-            obj_id = int(self.anno[index]["obj_id"])
-        else:
-            obj_id = random.randint(0, self.max_obj_num - 1)
-        if 'prompt' not in self.anno[index]:
-            question = random.choice(obj_caption_wid_prompt).replace('<id>', f"<OBJ{obj_id:03}>")
-        else:
-            question = self.anno[index]["prompt"]
+        obj_id = int(self.anno[index].get("obj_id", random.randint(0, self.max_obj_num - 1)))
+        question = self.anno[index].get("prompt", random.choice(obj_caption_wid_prompt).replace('<id>', f"<OBJ{obj_id:03}>"))
         caption = self.anno[index]["caption"]
         scene_id, scene_feat, scene_img_feat, scene_mask, scene_locs, assigned_ids = self.get_anno(index)
+
+        allowed_ids = set(assigned_ids.tolist())
+        desc_map = self.description_map.get(scene_id, {})
+        desc_list, used_ids = [], set()
+
+        REL_RE = re.compile(r"\b(next to|near|behind|in front of|on top of|under|between|inside|left|right|closest|farthest)\b", re.I)
+        should_inject = self.max_desc > 0 and ("<OBJ" in question or REL_RE.search(question))
+
+        if should_inject:
+            if len(desc_list) < self.max_desc:
+                candidates = []
+                q_lc = question.lower()
+                for oid, (name, desc) in desc_map.items():
+                    if oid in used_ids or oid not in allowed_ids:
+                        continue
+                    n = (name or "").strip().lower()
+                    if not n:
+                        continue
+                    m = re.search(r"\b" + re.escape(n) + r"(?:s|es)?\b", q_lc)
+                    if m:
+                        candidates.append((m.start(), oid, desc))
+                candidates.sort(key=lambda x: x[0])
+
+                for _, oid, desc in candidates:
+                    short = _shorten_desc(desc, max_words=10)
+                    if short:
+                        desc_list.append(f"<OBJ{oid:03}>: {short}")
+                        used_ids.add(oid)
+                        if len(desc_list) >= self.max_desc:
+                            break
+
+        if should_inject and desc_list:
+            question += "\n[Generated description (may be noisy)] " + " ".join(desc_list)
+
         caption = update_caption(caption, assigned_ids)
         question = update_caption(question, assigned_ids)
+
         return scene_feat, scene_img_feat, scene_mask, scene_locs, obj_id, assigned_ids, caption, question
 
 
@@ -94,10 +156,7 @@ def train_collate_fn(batch):
         "scene_locs": batch_scene_locs,
         "scene_mask": batch_scene_mask,
         "assigned_ids": batch_assigned_ids,
-        # "detach_mask": batch_detach_mask,
         "obj_ids": obj_ids,
         "answers": captions,
         "questions": questions
-        # "ref_captions": ref_captions,
-        # "ids": index
     }

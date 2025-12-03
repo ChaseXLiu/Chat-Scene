@@ -10,6 +10,11 @@ output.log
 /home/lcx/chat-scene/Chat-Scene/output.log
 untils_other/
 models/chat3d最新.py
+models/descrip3d.py
+models/inst3d.py
 models/版本.py
 wandb/
 */__pycache__/
+prompts/instruction_ori.txt
+dataset/des3d.py
+dataset/dataset_train_ori.py

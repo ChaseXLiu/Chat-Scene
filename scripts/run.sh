@@ -37,6 +37,7 @@ llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsy
 # val_tag="scanrefer#multi3dref#scan2cap#scanqa"
 
 train_tag="scanrefer#obj_align#nr3d_caption#scanqa"
+# train_tag="object_descriptions"
 val_tag="scanrefer#scanqa"
 
 
@@ -59,7 +60,7 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-# pretrained_path="/data/lcx/chat-scene/outputs/ours_mini20251125_225919_lr5e-6_ep10_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_16764.pth"
+# pretrained_path="/data/lcx/chat-scene/outputs/ours_mini20251127_175742_lr5e-6_ep10_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene 空间信息与Twin-Transformer/ckpt_01_11176.pth"
 # pretrained_path="/data/lcx/chat-scene/outputs/baseline_mini20251122_112917_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_16764.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_00_5029.pth"
