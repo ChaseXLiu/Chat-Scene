@@ -1,8 +1,9 @@
 # ========================= data ==========================
-anno_root = "/data/lcx/chat-scene/annotations"  # annotation dir
+anno_root = "annotations"  # annotation dir
 pc_encoder = "uni3d"
 segmentor = "mask3d"
-version = "_mini_20pct" # 使用 20% 数据集快速验证
+# version = "_mini_20pct" # 使用 20% 数据集快速验证
+version = ""
 
 gt_feat_file = f"{anno_root}/scannet_gt_{pc_encoder}_feats.pt"
 seg_feat_file = f"{anno_root}/scannet_{segmentor}_{pc_encoder}_feats.pt"
@@ -301,7 +302,7 @@ optimizer = dict(
     max_grad_norm=5,  # requires a positive float, use -1 to disable
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(
-        enable=True,
+        enable=False,
         module_names=["twin_transformer"],
         lr=[5e-5],
         wd=[0.02]

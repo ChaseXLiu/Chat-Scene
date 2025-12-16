@@ -14,7 +14,8 @@ models/descrip3d.py
 models/inst3d.py
 models/版本.py
 wandb/
-*/__pycache__/
+*/__pycache__
 prompts/instruction_ori.txt
 dataset/des3d.py
 dataset/dataset_train_ori.py
+models/chat3d_twin_transformer_linear_proj.py
