@@ -69,7 +69,7 @@ def train(
     metric_logger = MetricLogger(delimiter="  ")
     eval_metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", SmoothedValue(window=1, fmt="{value:.6f}"))
-    loss_names = ["loss", "obj_norm", "obj_img_norm", "objid_norm", "scene_norm"]
+    loss_names = ["loss", "loss_lm", "loss_coord", "obj_norm", "obj_img_norm", "objid_norm", "scene_norm"]
     media_types = get_media_types(train_loaders)
 
     # tot_param = sum(p.numel() for p in model_without_ddp.parameters())

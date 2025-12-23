@@ -2,8 +2,8 @@
 anno_root = "annotations"  # annotation dir
 pc_encoder = "uni3d"
 segmentor = "mask3d"
-# version = "_mini_20pct" # 使用 20% 数据集快速验证
-version = ""
+version = "_mini_50pct" # 使用 部分 数据集快速验证
+# version = ""
 
 gt_feat_file = f"{anno_root}/scannet_gt_{pc_encoder}_feats.pt"
 seg_feat_file = f"{anno_root}/scannet_{segmentor}_{pc_encoder}_feats.pt"

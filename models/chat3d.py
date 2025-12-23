@@ -52,28 +52,20 @@ def print_grad_status(model):
 
 class SpatialRelationAttention(nn.Module):
     """
-    3D空间关系注意力模块（使用标准Transformer机制）
-    
-    对于3D物体{O_1,O_2,...,O_n}，其中心点坐标为{C_1,C_2,...,C_n}。
-    对每一对物体{O_i,O_j}，计算它们的欧式距离和角度关系，构建空间关系特征。
-    通过空间条件注意力机制，捕获每个实例在整个3D场景中的成对空间关系。
+    指令感知的 3D 空间关系注意力模块
+    Instruction-Guided Geometric Gating
     """
     def __init__(self, feat_dim=1024, pos_dim=5, num_heads=8, 
-                 spatial_multihead=True, alpha=0.5):
+                 spatial_multihead=True, instr_dim=4096): # [新增] instr_dim
         """
         Args:
-            feat_dim (int): 物体特征维度
-            pos_dim (int): 位置特征维度，默认为5 [sinθh, cosθh, sinθv, cosθv, d_ij]
-            num_heads (int): 注意力头数
-            spatial_multihead (bool): 是否使用多头空间注意力
-            alpha (float): 空间偏置的缩放系数
+            instr_dim (int): 指令文本特征的维度 (例如 LLaMA hidden size)
         """
         super(SpatialRelationAttention, self).__init__()
         self.feat_dim = feat_dim
         self.num_heads = num_heads
         self.head_dim = feat_dim // num_heads
         self.spatial_multihead = spatial_multihead
-        self.alpha = nn.Parameter(torch.tensor(alpha))  # 可学习参数
 
         # QKV
         self.w_qs = nn.Linear(feat_dim, feat_dim)
@@ -88,13 +80,22 @@ class SpatialRelationAttention(nn.Module):
         # 用于计算 l_i
         self.w_p = nn.Linear(3 + feat_dim, pos_dim, bias=False)
         
-    def forward(self, objects, positions):
+        # [新增] 门控生成网络 (Gate Network)
+        # 输入：指令特征 [B, instr_dim]
+        # 输出：每个注意力头的门控值 [B, num_heads]
+        self.gate_net = nn.Sequential(
+            nn.Linear(instr_dim, feat_dim // 4),
+            nn.ReLU(),
+            nn.Linear(feat_dim // 4, num_heads), # 为每个头生成一个独立的 gate
+            nn.Sigmoid() # 限制在 0~1 之间
+        )
+
+    def forward(self, objects, positions, instr_embeds):
         """
         Args:
             objects: [B, N, D]  物体特征
             positions: [B, N, 3] 物体坐标
-        Returns:
-            output: [B, N, D] 增强后的物体特征
+            instr_embeds: [B, D_instr] 指令特征 (Sentence Embedding)
         """
         B, N, D = objects.shape
         residual = objects
@@ -110,33 +111,52 @@ class SpatialRelationAttention(nn.Module):
         # ---- 计算 pairwise 空间特征 s_ij ----
         pos1 = positions.unsqueeze(2)  # [B, N, 1, 3]
         pos2 = positions.unsqueeze(1)  # [B, 1, N, 3]
-        delta = pos2 - pos1             # [B, N, N, 3]
+        delta = pos2 - pos1            # [B, N, N, 3]
 
-        d_ij = torch.norm(delta, dim=-1)  # 距离
+        d_ij = torch.norm(delta, dim=-1)  
         theta_h = torch.atan2(delta[..., 1], delta[..., 0] + 1e-8)
         theta_v = torch.asin(delta[..., 2] / (d_ij + 1e-8))
 
         s_ij = torch.stack([
-            torch.sin(theta_h),
-            torch.cos(theta_h),
-            torch.sin(theta_v),
-            torch.cos(theta_v),
+            torch.sin(theta_h), torch.cos(theta_h),
+            torch.sin(theta_v), torch.cos(theta_v),
             d_ij
         ], dim=-1)  # [B, N, N, 5]
 
         # ---- l_i ----
         pos_exp = positions.unsqueeze(2).expand(-1, -1, N, -1)
         obj_exp = objects.unsqueeze(1).expand(-1, N, -1, -1)
-        pos_obj = torch.cat([pos_exp, obj_exp], dim=-1)  # [B, N, N, 3+D]
+        pos_obj = torch.cat([pos_exp, obj_exp], dim=-1) 
 
-        l_i = self.w_p(pos_obj)  # [B, N, N, pos_dim]
+        l_i = self.w_p(pos_obj) 
 
         # ---- 空间 logits ----
-        spatial_logits = torch.sum(l_i * s_ij, dim=-1)  # [B, N, N]
-        spatial_logits = spatial_logits.unsqueeze(0).expand(self.num_heads, -1, -1, -1)
+        # [B, N, N]
+        spatial_bias = torch.sum(l_i * s_ij, dim=-1) 
+        
+        # 扩展维度以匹配多头: [num_heads, B, N, N]
+        spatial_bias = spatial_bias.unsqueeze(0).expand(self.num_heads, -1, -1, -1)
 
-        # ---- Add 融合 ----
-        fused_logits = attn_logits + self.alpha * spatial_logits
+        # ==========================================
+        # [新增] 计算动态门控 (Dynamic Gating)
+        # ==========================================
+        
+        # 1. 计算 Gate 值
+        # input: [B, D_instr] -> output: [B, num_heads]
+        gate_values = self.gate_net(instr_embeds) 
+        
+        # 2. 调整维度以便广播 (Broadcasting)
+        # 目标形状: [num_heads, B, 1, 1] 以便乘以 [num_heads, B, N, N]
+        gate_values = gate_values.transpose(0, 1) # [num_heads, B]
+        gate_values = gate_values.unsqueeze(-1).unsqueeze(-1) # [num_heads, B, 1, 1]
+        
+        # 3. 动态融合
+        # 如果问题是 "Where is...", gate 趋近 1，空间关系被注入。
+        # 如果问题是 "What color...", gate 趋近 0，空间关系被抑制。
+        fused_logits = attn_logits + gate_values * spatial_bias
+
+        # ==========================================
+
         attn = torch.softmax(fused_logits, dim=-1)
 
         # ---- 加权求和 ----
@@ -318,13 +338,21 @@ class Chat3D(nn.Module):
             nn.Linear(self.pos_dim, self.llama_dim)
         )
 
+        # [新增] 创新点 B: 几何辅助任务头 (Geometry-Aware Auxiliary Task Head)
+        # 用于从 Object Token 隐状态预测坐标 (x, y, z)
+        self.coord_head = nn.Sequential(
+            nn.Linear(self.llama_dim, self.llama_dim // 2),
+            nn.ReLU(),
+            nn.Linear(self.llama_dim // 2, 6) # 同时预测物体的中心坐标以及长宽高
+        )
+
         # 初始化空间关系注意力模块
         self.spatial_relation_attention = SpatialRelationAttention(
             feat_dim=self.input_dim,
             pos_dim=5,  # [sin(θ_h), cos(θ_h), sin(θ_v), cos(θ_v), d_ij]
             num_heads=8,
             spatial_multihead=True,
-            alpha=0.5
+            instr_dim=self.llama_dim
         )
   
         # self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.scene_dim, nhead=8, dim_feedforward=2048, dropout=0.05, norm_first=True, batch_first=True)
@@ -354,7 +382,7 @@ class Chat3D(nn.Module):
             self.instruction = "\n".join([x.strip() for x in f.readlines()])
 
         if not self.debug:
-            self.p_0_embed, self.p_mid_embed, self.p_1_embed = self.prepare_fixed_embed()
+            self.p_0_embed, self.p_1_embed = self.prepare_fixed_embed()
         self.last_embed = None
         
         # print_grad_status(self)
@@ -378,43 +406,50 @@ class Chat3D(nn.Module):
             return self.llama_model.model.embed_tokens(token_ids)
 
     def prepare_fixed_embed(self):
-        """预计算固定部分的embedding来减少运行时的计算开销"""
-        # 组合系统提示、指令和角色前缀
-        prompt = self.system + " " + self.instruction + " " + self.role[0] + ": "
-
-        ADDON_MARK = "<ADDON>"
-        REPLACE_MARK = "<REPLACE>"
-        a_idx = prompt.find(ADDON_MARK)
-        r_idx = prompt.find(REPLACE_MARK)
-
-        if a_idx == -1 or r_idx == -1 or not (a_idx < r_idx):
-            p_0, p_1 = prompt.split(REPLACE_MARK)
-            p_mid = ""
-        else:
-            p_0 = prompt[:a_idx]
-            p_mid = prompt[a_idx + len(ADDON_MARK): r_idx]
-            p_1 = prompt[r_idx + len(REPLACE_MARK):]
-
-        p0_tok  = self.llama_tokenizer(p_0,  return_tensors="pt", add_special_tokens=True)
-        pmid_tok= self.llama_tokenizer(p_mid,return_tensors="pt", add_special_tokens=False)
-        p1_tok  = self.llama_tokenizer(p_1,  return_tensors="pt", add_special_tokens=False)
-
-        p_0_embed  = self.llama_embed_tokens(p0_tok.input_ids).squeeze(0).detach()
-        p_mid_embed= self.llama_embed_tokens(pmid_tok.input_ids).squeeze(0).detach()
-        p_1_embed  = self.llama_embed_tokens(p1_tok.input_ids).squeeze(0).detach()
-        return p_0_embed, p_mid_embed, p_1_embed
+        prompt = self.system + " " + self.instruction + " " + self.role[0] + ": " 
+        p_0, p_1 = prompt.split("<REPLACE>")
+        p_0_token = self.llama_tokenizer(p_0, return_tensors="pt", add_special_tokens=True)
+        p_1_token = self.llama_tokenizer(p_1, return_tensors="pt", add_special_tokens=False)
+        p_0_embed = self.llama_embed_tokens(p_0_token.input_ids).squeeze(0).detach()
+        p_1_embed = self.llama_embed_tokens(p_1_token.input_ids).squeeze(0).detach()
+        return p_0_embed, p_1_embed
 
     def get_text_emb(self, text, device="cpu"):
-        text_tokens = self.llama_tokenizer(text, return_tensors="pt", add_special_tokens=False).to(device)
+        """
+        获取文本 Embedding，支持单条或 Batch 处理。
+        Args:
+            text: str 或 List[str]
+        Returns:
+            embeds: [B, L, D] (如果输入是str，则 B=1)
+            attention_mask: [B, L] (用于指示 padding 位置)
+        """
+        if isinstance(text, list):
+            text_tokens = self.llama_tokenizer(
+                text, 
+                return_tensors="pt", 
+                padding=True, 
+                truncation=True, 
+                max_length=512,
+                add_special_tokens=False
+            ).to(device)
+        else:
+            text_tokens = self.llama_tokenizer(
+                text, 
+                return_tensors="pt", 
+                add_special_tokens=False
+            ).to(device)
+
         embeds = self.llama_embed_tokens(text_tokens.input_ids)
+
         if self.train_emb:
             indices = text_tokens.input_ids >= self.ori_vocab_size
-            indices = (indices * 1).unsqueeze(-1)
+            indices = (indices * 1).unsqueeze(-1) # [B, L, 1]
             embeds = (1 - indices) * embeds.detach() + indices * embeds
         else:
             embeds = embeds.detach()
-        return embeds
 
+        return embeds, text_tokens.attention_mask
+            
     # def encode_object_feat(self, feat, img_feat, locs):
     #     """
     #     feat : 3D物体的原始特征
@@ -580,78 +615,105 @@ class Chat3D(nn.Module):
         maxs = masked_xyz_max.max(dim=1)[0]
         return mins, maxs
 
-    def forward_train(self, scene_feat, scene_img_feat, scene_locs, scene_mask, obj_ids, assigned_ids, questions, answers, is_eval=False, **kwargs):
+    def forward_train(self, scene_feat, scene_img_feat, scene_locs, scene_mask, obj_ids, assigned_ids, questions, answers, is_eval=False, description_embeds=None, **kwargs):
         """3D场景对话模型的训练前向传播
         核心流程:
         1. 多模态特征编码 → 2. 空间位置处理 → 3. 注意力机制 → 4. 文本生成
         参数:
             scene_feat: 3D场景特征 [bs, num_objs, feat_dim]
             scene_img_feat: 2D图像特征 [bs, num_objs, feat_dim]
-            scene_locs: 物体3D坐标 [bs, num_objs, 3] 
+            scene_locs: 物体3D坐标 [bs, num_objs, 3]
             scene_mask: 有效物体掩码 [bs, num_objs]
             obj_ids: 目标物体ID [bs]
             assigned_ids: 物体分配ID [bs, num_objs]
             questions: 问题文本列表 [bs]
             answers: 答案文本列表 [bs]
+            description_embeds: [新增] 离线提取的物体描述特征 [bs, num_objs, feat_dim] (Innovation C)
         返回:
             包含各项损失的字典
-        """       
+        """      
         # 获取对象嵌入
         object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
         device = object_embed.device
         batch_size = object_embed.shape[0]
 
-        # 注入空间信息特征 
-        object_embed = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3])
+        # 预处理所有文本提示
+        prompts = [f"{q} {self.role[1]}: " for q in questions]
+        seq_embeds, mask_text_batch = self.get_text_emb(prompts, device=device)
+
+        # 执行 Masked Mean Pooling (池化操作)
+        # 将 mask 扩展维度以匹配 embedding: [B, L] -> [B, L, 1]
+        mask_expanded = mask_text_batch.unsqueeze(-1).float()
+
+        # 分子：对有效位置的 embedding 求和
+        # 此时 padding 位置 (mask=0) 的 embedding 会被乘 0，从而剔除
+        sum_embeddings = torch.sum(seq_embeds * mask_expanded, dim=1) # [B, D]
+
+        # 分母：计算有效 token 的数量
+        # clamp 是为了防止全 0 (虽然很少见) 导致除以 0 报错
+        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9) # [B, 1]
+        # 得到最终的句子向量
+        instr_embeds = sum_embeddings / sum_mask # [B, D]
+
+        # 注入空间信息特征
+        object_embed = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
         object_embed = torch.nn.functional.normalize(object_embed, dim=-1)
 
         proj_object_embed = self.object_proj(object_embed)
+
         proj_object_img_embed = self.object_img_proj(object_img_embed)
-
         proj_scene_embed = None
-
         input_embed_list, attn_list, target_list = [], [], []
+
+        # [新增] 记录每个样本中 Object Token 的位置索引和对应的真实坐标
+        batch_obj_indices = []
+        batch_target_coords = []
+        
         max_seq_len = 0
         p_0_embed = self.p_0_embed.to(device)
-        p_mid_embed = self.p_mid_embed.to(device)
         p_1_embed = self.p_1_embed.to(device)
-
-        system_addons = kwargs.get("system_addon", None)
 
         for i, question in enumerate(questions):
             # 获取对象特征列表
-            prompt = f"{question} {self.role[1]}: "
-            prompt_embed = self.get_text_emb(prompt, device=device).squeeze(0)
-
-            addon_text = ""
-            if system_addons is not None:
-                addon_text = (system_addons[i] or "").strip()
-
-            addon_embed = None
-            if addon_text:
-                addon_embed = self.get_text_emb("\n" + addon_text + "\n", device=device).squeeze(0)
-                addon_embed = 1 * addon_embed
+            valid_len = mask_text_batch[i].sum().item()
+            prompt_embed = seq_embeds[i, :valid_len] # [L_real, D]
 
             object_list_embed = self.get_object_list_embed(
-                proj_object_embed[i], 
+                proj_object_embed[i],
                 proj_object_img_embed[i] if self.add_img_token else None,
-                proj_scene_embed[i] if self.add_scene_token else None, 
+                proj_scene_embed[i] if self.add_scene_token else None,
                 scene_mask[i],
                 obj_ids[i],
                 assigned_ids[i]
             )
+            # [新增] 计算该样本中 Object Token 的索引
+            p_0_len = p_0_embedshape[0]
+            obj_seq_len = objec.t_list_embed.shape[0]
+            num_valid_objs = scene_mask[i].sum().item()
+            current_obj_indices = []
+            current_target_coords = []
 
-            st = p_0_embed.shape[0] \
-                 + (0 if addon_embed is None else addon_embed.shape[0]) \
-                 + p_mid_embed.shape[0]
-            ed = st + object_list_embed.shape[0]
+            if num_valid_objs > 0:
+                # 计算步长 stride
+                stride = obj_seq_len // num_valid_objs
 
-            pieces = [p_0_embed]
-            if addon_embed is not None:
-                pieces.append(addon_embed)
-            pieces.extend([p_mid_embed, object_list_embed, p_1_embed, prompt_embed])
-            wrapped_embed = torch.cat(pieces, dim=0)
+                # 获取有效物体的 ID (对应 scene_feat/scene_locs 的索引)
+                valid_ids = torch.where(scene_mask[i])[0]
+                valid_assigned_ids = assigned_ids[i][valid_ids]
 
+                # 获取对应的真实坐标
+                target_locs = scene_locs[i][valid_assigned_ids] # [N_valid, 6]
+
+                for j in range(num_valid_objs):
+                    # 修正：选取每个物体序列的最后一个 Token
+                    # 原因：LLaMA 是 Causal LM，只有最后一个 Token 能看到前面的完整信息 (ID + Features)
+                    idx = p_0_len + j * stride + stride - 1
+                    current_obj_indices.append(idx)
+                    current_target_coords.append(target_locs[j])
+
+            batch_obj_indices.append(current_obj_indices)
+            batch_target_coords.append(torch.stack(current_target_coords) if current_target_coords else torch.empty(0, 6).to(device))
+            wrapped_embed = torch.cat([p_0_embed, object_list_embed, p_1_embed, prompt_embed], dim=0)
             wrapped_attn = torch.ones(wrapped_embed.size()[:-1], dtype=torch.long).to(wrapped_embed.device)
             empty_target = torch.ones(wrapped_attn.shape[0], dtype=torch.long).to(device).fill_(-100)
             # 处理答案文本
@@ -662,18 +724,18 @@ class Chat3D(nn.Module):
                 to_regress_token.input_ids == self.llama_tokenizer.pad_token_id, -100
             ).squeeze(0)
             # to_regress_embed = self.llama_model.model.embed_tokens(to_regress_token.input_ids).squeeze(0).detach()
-            to_regress_embed = self.get_text_emb(answer, device=device).squeeze(0)
+            to_regress_embed, _ = self.get_text_emb(answer, device=device)
+            to_regress_embed = to_regress_embed.squeeze(0)
 
             # 构建模型输入
             target = torch.cat([empty_target, answer_target], dim=0)
-
             input_embed = torch.cat([wrapped_embed, to_regress_embed], dim=0)
             attn = torch.cat([wrapped_attn, to_regress_token.attention_mask[0]], dim=0)
             input_embed_list.append(input_embed)
             attn_list.append(attn)
             target_list.append(target)
             max_seq_len = max(max_seq_len, target.shape[0])
-        
+
         max_seq_len = min(768, max_seq_len)
 
         def pad_and_trim(tensor_list, max_len, batch_first=True, padding_value=0):
@@ -681,7 +743,7 @@ class Chat3D(nn.Module):
             if padded.shape[1] > max_len:
                 return padded[:, :max_len]
             return padded
-        
+
         input_embeds = pad_and_trim(input_embed_list, max_seq_len, batch_first=True, padding_value=0).to(device)
         targets = pad_and_trim(target_list, max_seq_len, batch_first=True, padding_value=-100).to(device)
         attention_mask = pad_and_trim(attn_list, max_seq_len, batch_first=True, padding_value=0).to(device)
@@ -691,10 +753,70 @@ class Chat3D(nn.Module):
                 attention_mask=attention_mask,
                 return_dict=True,
                 labels=targets,
+                output_hidden_states=True
             )
+        hidden_states = outputs.hidden_states[-1] # [B, L, D]
+
+        # ==========================================
+        # [新增] 创新点 B: 计算几何辅助任务损失 (Coordinate Regression Loss)
+        # ==========================================
+        loss_coord = torch.tensor(0.0, device=device)
+        total_valid_objs = 0
+
+        for i in range(batch_size):
+            indices = batch_obj_indices[i]
+            target_locs = batch_target_coords[i]
+            if not indices:
+                continue
+            # 过滤超出 max_seq_len 的索引 (虽然一般不会发生，因为 max_seq_len 是根据 target 算的)
+            valid_indices = [idx for idx in indices if idx < max_seq_len]
+            if not valid_indices:
+                continue
+            # 提取 Object Token 的隐状态
+            obj_hidden = hidden_states[i, valid_indices, :] # [N_valid, D]
+            # 预测坐标
+            pred_coords = self.coord_head(obj_hidden) # [N_valid, 6]
+            # 计算 MSE Loss
+            curr_target = target_locs[:len(valid_indices)]
+            # [DEBUG Innovation B] 打印预测坐标与真实坐标 (只打印第一个batch的第一个物体)
+            # if i == 0 and len(pred_coords) > 0:
+            #     print(f"\n[DEBUG Innovation B Loss] Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}")
+            #     print(f"  Pred Coord: {pred_coords[0].detach().cpu().tolist()}")
+            #     print(f"  Target Coord: {curr_target[0].cpu().tolist()}")
+            #     print(f"  Diff: {(pred_coords[0] - curr_target[0]).detach().cpu().tolist()}")
+            loss_coord += F.mse_loss(pred_coords, curr_target, reduction='sum')
+            total_valid_objs += len(valid_indices)
+
+        if total_valid_objs > 0:
+            loss_coord = loss_coord / total_valid_objs
+
+        # ==========================================
+        # [新增] 创新点 C: 基于对齐的描述增强 (Alignment-based Description Enhancement)
+        # ==========================================
+        # loss_align = torch.tensor(0.0, device=device)
+        # if description_embeds is not None:
+        #     # description_embeds: [B, N, D]
+        #     # proj_object_embed: [B, N, D]
+        #     # 确保 description_embeds 在正确的设备上
+        #     description_embeds = description_embeds.to(device)
+        #     # 扩展 mask 以匹配维度
+        #     mask = scene_mask.unsqueeze(-1) # [B, N, 1]           
+        #     # 计算 MSE Loss (只计算有效物体)
+        #     diff = (proj_object_embed - description_embeds) * mask
+        #     # 避免除以 0
+        #     num_valid = mask.sum()
+        #     if num_valid > 0:
+        #         loss_align = (diff ** 2).sum() / (num_valid * diff.shape[-1])
+
+        # 总损失
+        # total_loss = outputs.loss + 1.0 * loss_coord + 1.0 * loss_align
+        total_loss = outputs.loss + 0.5 * loss_coord
 
         return dict(
-            loss=outputs.loss,
+            loss=total_loss,
+            loss_lm=outputs.loss,
+            loss_coord=loss_coord,
+            # loss_align=loss_align,
             obj_norm=proj_object_embed.norm(dim=-1).mean().detach().cpu(),
             obj_img_norm=proj_object_img_embed.norm(dim=-1).mean().detach().cpu(),
             objid_norm=self.get_objid_embeds().norm(dim=-1).mean().detach().cpu(),
@@ -721,8 +843,35 @@ class Chat3D(nn.Module):
         device = object_embed.device
         batch_size, obj_num = object_embed.shape[:2]
 
+        # 预处理所有文本提示
+        # update_caption 是 CPU 字符串操作
+        prompts = []
+        for i in range(batch_size):
+            tmp_prompt = f" {custom_prompt[i]} {self.role[1]}: "
+            tmp_prompt = update_caption(tmp_prompt, assigned_ids[i])
+            prompts.append(tmp_prompt)
+        # 获取文本 Embedding
+        # features_text_batch: [B, L_max, D]
+        # mask_text_batch:     [B, L_max]
+        seq_embeds, mask_text_batch = self.get_text_emb(prompts, device=device)
+
+        # 执行 Masked Mean Pooling (池化操作)
+        # 将 mask 扩展维度以匹配 embedding: [B, L] -> [B, L, 1]
+        mask_expanded = mask_text_batch.unsqueeze(-1).float()
+
+        # 分子：对有效位置的 embedding 求和
+        # 此时 padding 位置 (mask=0) 的 embedding 会被乘 0，从而剔除
+        sum_embeddings = torch.sum(seq_embeds * mask_expanded, dim=1) # [B, D]
+
+        # 分母：计算有效 token 的数量
+        # clamp 是为了防止全 0 (虽然很少见) 导致除以 0 报错
+        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9) # [B, 1]
+
+        # 得到最终的句子向量
+        instr_embeds = sum_embeddings / sum_mask # [B, D]
+
         # 注入空间信息特征 
-        object_embed = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3])
+        object_embed = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
         object_embed = torch.nn.functional.normalize(object_embed, dim=-1)
 
         proj_object_embed = self.object_proj(object_embed)
@@ -730,24 +879,13 @@ class Chat3D(nn.Module):
 
         proj_scene_embed = None
         
-        system_addons = kwargs.get("system_addon", None)
-
         output_texts = []
         p_0_embed = self.p_0_embed.to(device).unsqueeze(0)
-        p_mid_embed = self.p_mid_embed.to(device).unsqueeze(0)
         p_1_embed = self.p_1_embed.to(device).unsqueeze(0)
 
         for i in range(batch_size):
-            tmp_prompt = f" {custom_prompt[i]} {self.role[1]}: "
-            prompt_embed = self.get_text_emb(tmp_prompt, device=device)
-
-            addon_text = ""
-            if system_addons is not None:
-                addon_text = (system_addons[i] or "").strip()
-            addon_embed = None
-            if addon_text:
-                addon_embed = self.get_text_emb("\n" + addon_text + "\n", device=device)
-                addon_embed = 1 * addon_embed
+            valid_len = mask_text_batch[i].sum().item()
+            prompt_embed = seq_embeds[i, :valid_len].unsqueeze(0) # [1, L_real, D]
 
             object_list_embed = self.get_object_list_embed(
                 proj_object_embed[i], 
@@ -759,12 +897,7 @@ class Chat3D(nn.Module):
             )
             object_list_embed = object_list_embed.unsqueeze(0)
 
-            pieces = [p_0_embed]
-            if addon_embed is not None:
-                pieces.append(addon_embed)
-            pieces.extend([p_mid_embed, object_list_embed, p_1_embed, prompt_embed])
-            wrapped_embed = torch.cat(pieces, dim=1)
-
+            wrapped_embed = torch.cat([p_0_embed, object_list_embed, p_1_embed, prompt_embed], dim=1)
             attention_mask=None
             with self.maybe_autocast():
                 outputs = self.llama_model.generate(

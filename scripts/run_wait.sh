@@ -1,4 +1,6 @@
-# 
+# bash scripts/run_wait.sh
+# nohup bash scripts/run_wait.sh > wait.log 2>&1 &
+
 which_python=$(which python)
 export PYTHONPATH=${PYTHONPATH}:${which_python}:.
 echo "PYTHONPATH: ${PYTHONPATH}"
@@ -43,95 +45,16 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting to wait for GPU memory..."
 wait_for_gpu
 echo "$(date '+%Y-%m-%d %H:%M:%S') - GPU memory is sufficient, starting training..."
 
-epoch=15
-batch_size=8
-lr=5e-6
-train_emb=True
-train_img_proj=True
-train_spatial_attn=True
-add_img_token=True
-add_scene_token=False
-no_obj=False
-input_dim=1024 # 1024
-bidirection=False
-different_lr=False
-max_obj_num=100
-lora_r=16
-lora_alpha=16
-add_pos_emb=False
-feat_fusion=False
-fuse_with_id=False
-config="/home/lcx/chat-scene/Chat-Scene/scripts/"
-max_grad_norm=0.01
-seed=42
-use_location_token=False
+# Source configuration from run.sh
+source scripts/run.sh
 
-llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsys--vicuna-7b-v1.5"
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting training..."
 
-# train_tag="scanrefer#scan2cap#scanqa#sqa3d#multi3dref#nr3d_caption#obj_align" 
+# 方式1：前台运行（直接在当前终端显示输出，等同于执行 bash scripts/run.sh）
+python tasks/train.py "${ARGS[@]}"
 
-train_tag="scanrefer#obj_align#nr3d_caption#scanqa"
-val_tag="scanrefer#scanqa"
-
-# evaluate=True
-evaluate=False
-
-debug=False
-if [ $debug = "True" ]; then
-    enable_wandb=False
-    gpu_num=1
-    do_save=False
-    other_info="debug"
-else
-    enable_wandb=False
-    gpu_num=1
-    do_save=True
-    other_info="chatscene"
-fi
-
-tag="${train_tag}__${val_tag}__${other_info}"
-
-pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251110_200743_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_44052.pth"
-# pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20250506_201448_lr5e-6_ep3_scanrefer#multi3dref#nr3d_caption#obj_align__scanrefer#multi3dref__chatscene/ckpt_00_15075.pth"
-
-OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
-mkdir -p ${OUTPUT_DIR}
-
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting training with nohup..."
-# 使用nohup在后台运行训练脚本，输出日志到train.log文件
-nohup python tasks/train.py \
-    "${config}config.py" \
-    output_dir "$OUTPUT_DIR" \
-    scheduler.epochs "$epoch" \
-    optimizer.lr "$lr" \
-    model.add_scene_token "$add_scene_token" \
-    model.add_img_token "$add_img_token" \
-    pretrained_path "$pretrained_path" \
-    evaluate "$evaluate" \
-    wandb.enable "$enable_wandb" \
-    gpu_num "$gpu_num" \
-    do_save "$do_save" \
-    batch_size "$batch_size" \
-    model.train_emb "$train_emb" \
-    model.train_img_proj "$train_img_proj" \
-    train_tag "$train_tag" \
-    val_tag "$val_tag" \
-    model.no_obj "$no_obj" \
-    segmentor "$segmentor" \
-    pc_encoder "$pc_encoder" \
-    model.input_dim "$input_dim" \
-    model.bidirection "$bidirection" \
-    optimizer.different_lr.enable "$different_lr" \
-    model.max_obj_num "$max_obj_num" \
-    lora.lora_r "$lora_r" \
-    lora.lora_alpha "$lora_alpha" \
-    model.add_pos_emb "$add_pos_emb" \
-    model.feat_fusion "$feat_fusion" \
-    optimizer.max_grad_norm "$max_grad_norm" \
-    seed "$seed" \
-    model.fuse_with_id "$fuse_with_id" \
-    model.llama_model_path "$llama_model_path" \
-    model.use_location_token "$use_location_token" > ${OUTPUT_DIR}/train.log 2>&1 &
+# 方式2：后台运行（使用nohup在后台运行，输出日志到train.log文件）
+# nohup python tasks/train.py "${ARGS[@]}" > ${OUTPUT_DIR}/train.log 2>&1 &
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Training started in background with PID $!"
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Check log file at ${OUTPUT_DIR}/train.log for training progress"
