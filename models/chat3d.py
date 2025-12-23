@@ -345,6 +345,10 @@ class Chat3D(nn.Module):
             nn.ReLU(),
             nn.Linear(self.llama_dim // 2, 6) # 同时预测物体的中心坐标以及长宽高
         )
+        
+        # [新增] 创新点 B: 垂直聚合的可学习权重 (Layer-Level Adaptive Pooling)
+        # 对应 Layer 18-24 (共7层)
+        self.geo_layer_weights = nn.Parameter(torch.ones(7))
 
         # 初始化空间关系注意力模块
         self.spatial_relation_attention = SpatialRelationAttention(
@@ -687,8 +691,8 @@ class Chat3D(nn.Module):
                 assigned_ids[i]
             )
             # [新增] 计算该样本中 Object Token 的索引
-            p_0_len = p_0_embedshape[0]
-            obj_seq_len = objec.t_list_embed.shape[0]
+            p_0_len = p_0_embed.shape[0]
+            obj_seq_len = object_list_embed.shape[0]
             num_valid_objs = scene_mask[i].sum().item()
             current_obj_indices = []
             current_target_coords = []
@@ -705,10 +709,10 @@ class Chat3D(nn.Module):
                 target_locs = scene_locs[i][valid_assigned_ids] # [N_valid, 6]
 
                 for j in range(num_valid_objs):
-                    # 修正：选取每个物体序列的最后一个 Token
-                    # 原因：LLaMA 是 Causal LM，只有最后一个 Token 能看到前面的完整信息 (ID + Features)
-                    idx = p_0_len + j * stride + stride - 1
-                    current_obj_indices.append(idx)
+                    # 改动：选取每个物体序列的所有 Token 并进行 Mean Pooling
+                    start_idx = p_0_len + j * stride
+                    end_idx = p_0_len + (j + 1) * stride
+                    current_obj_indices.append((start_idx, end_idx))
                     current_target_coords.append(target_locs[j])
 
             batch_obj_indices.append(current_obj_indices)
@@ -755,11 +759,19 @@ class Chat3D(nn.Module):
                 labels=targets,
                 output_hidden_states=True
             )
-        hidden_states = outputs.hidden_states[-1] # [B, L, D]
+        # hidden_states = outputs.hidden_states[-1] # [B, L, D]
 
         # ==========================================
         # [新增] 创新点 B: 计算几何辅助任务损失 (Coordinate Regression Loss)
         # ==========================================
+        # Dual-Aggregation Strategy:
+        # 1. 提取 Layer 18-24 的 Hidden States
+        # outputs.hidden_states 是 tuple, index 18 对应 Layer 18 的输出 (假设 index 0 是 embedding)
+        selected_layers = torch.stack(outputs.hidden_states[18:25], dim=0) # [7, B, L, D]
+        
+        # 计算层级权重
+        layer_weights = torch.softmax(self.geo_layer_weights, dim=0) # [7]
+
         loss_coord = torch.tensor(0.0, device=device)
         total_valid_objs = 0
 
@@ -768,24 +780,39 @@ class Chat3D(nn.Module):
             target_locs = batch_target_coords[i]
             if not indices:
                 continue
-            # 过滤超出 max_seq_len 的索引 (虽然一般不会发生，因为 max_seq_len 是根据 target 算的)
-            valid_indices = [idx for idx in indices if idx < max_seq_len]
-            if not valid_indices:
+            
+            obj_hidden_list = []
+            valid_count = 0
+            for start, end in indices:
+                if start < max_seq_len:
+                    actual_end = min(end, max_seq_len)
+                    if actual_end > start:
+                        # 1. Horizontal Aggregation: Token-Level Mean Pooling
+                        # [7, tokens, D] -> [7, D]
+                        token_feats = selected_layers[:, i, start:actual_end, :]
+                        h_obj_l = token_feats.mean(dim=1) 
+                        
+                        # 2. Vertical Aggregation: Layer-Level Weighted Sum
+                        # [7, D] * [7, 1] -> sum -> [D]
+                        h_geo = (h_obj_l * layer_weights.view(-1, 1)).sum(dim=0)
+                        
+                        obj_hidden_list.append(h_geo)
+                        valid_count += 1
+                else:
+                    break
+            
+            if valid_count == 0:
                 continue
+
             # 提取 Object Token 的隐状态
-            obj_hidden = hidden_states[i, valid_indices, :] # [N_valid, D]
+            obj_hidden = torch.stack(obj_hidden_list) # [N_valid, D]
             # 预测坐标
             pred_coords = self.coord_head(obj_hidden) # [N_valid, 6]
             # 计算 MSE Loss
-            curr_target = target_locs[:len(valid_indices)]
-            # [DEBUG Innovation B] 打印预测坐标与真实坐标 (只打印第一个batch的第一个物体)
-            # if i == 0 and len(pred_coords) > 0:
-            #     print(f"\n[DEBUG Innovation B Loss] Rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}")
-            #     print(f"  Pred Coord: {pred_coords[0].detach().cpu().tolist()}")
-            #     print(f"  Target Coord: {curr_target[0].cpu().tolist()}")
-            #     print(f"  Diff: {(pred_coords[0] - curr_target[0]).detach().cpu().tolist()}")
+            curr_target = target_locs[:valid_count]
+            
             loss_coord += F.mse_loss(pred_coords, curr_target, reduction='sum')
-            total_valid_objs += len(valid_indices)
+            total_valid_objs += valid_count
 
         if total_valid_objs > 0:
             loss_coord = loss_coord / total_valid_objs

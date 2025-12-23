@@ -60,8 +60,8 @@ if [ $debug = "True" ]; then
     do_save=False
     other_info="debug"
 else
-    enable_wandb=True
-    # enable_wandb=False
+    # enable_wandb=True
+    enable_wandb=False
     gpu_num=1
     do_save=True
     other_info="chatscene"

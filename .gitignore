@@ -19,3 +19,4 @@ prompts/instruction_ori.txt
 dataset/des3d.py
 dataset/dataset_train_ori.py
 models/chat3d_twin_transformer_linear_proj.py
+models/chat3d_latest.py
