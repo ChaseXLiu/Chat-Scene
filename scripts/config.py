@@ -227,7 +227,7 @@ val_file_dict = {
 }
 
 
-num_workers = 32
+num_workers = 16
 batch_size = 32
 
 

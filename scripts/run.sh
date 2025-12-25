@@ -69,9 +69,9 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-# pretrained_path="/data/lcx/chat-scene/outputs/ours_mini20251127_175742_lr5e-6_ep10_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene 空间信息与Twin-Transformer/ckpt_01_11176.pth"
+pretrained_path="/data/lcx/chat-scene/outputs/ours_mini20251223_215938_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_00_7946.pth"
 # pretrained_path="/data/lcx/chat-scene/outputs/baseline_mini20251122_112917_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_16764.pth"
-pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
+# pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_00_5029.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251018_135615_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref__scanrefer#scan2cap#scanqa__chatscene/ckpt_00_23902.pth"
 # pretrained_path=""

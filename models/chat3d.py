@@ -781,31 +781,61 @@ class Chat3D(nn.Module):
             if not indices:
                 continue
             
-            obj_hidden_list = []
-            valid_count = 0
-            for start, end in indices:
-                if start < max_seq_len:
-                    actual_end = min(end, max_seq_len)
-                    if actual_end > start:
-                        # 1. Horizontal Aggregation: Token-Level Mean Pooling
-                        # [7, tokens, D] -> [7, D]
-                        token_feats = selected_layers[:, i, start:actual_end, :]
-                        h_obj_l = token_feats.mean(dim=1) 
-                        
-                        # 2. Vertical Aggregation: Layer-Level Weighted Sum
-                        # [7, D] * [7, 1] -> sum -> [D]
-                        h_geo = (h_obj_l * layer_weights.view(-1, 1)).sum(dim=0)
-                        
-                        obj_hidden_list.append(h_geo)
-                        valid_count += 1
-                else:
-                    break
+            # Optimize: Vectorized processing instead of loop over objects
+            # indices are contiguous: [start, start+stride), [start+stride, start+2*stride), ...
+            start_all = indices[0][0]
+            stride = indices[0][1] - indices[0][0]
             
-            if valid_count == 0:
+            if start_all >= max_seq_len:
                 continue
 
-            # 提取 Object Token 的隐状态
-            obj_hidden = torch.stack(obj_hidden_list) # [N_valid, D]
+            # Determine valid range considering max_seq_len
+            requested_end = indices[-1][1]
+            actual_end_all = min(requested_end, max_seq_len)
+            
+            valid_len = actual_end_all - start_all
+            if valid_len <= 0:
+                continue
+
+            # Calculate how many full objects we have
+            full_objs_count = valid_len // stride
+            remainder = valid_len % stride
+            
+            obj_hidden_list = []
+            
+            # 1. Process full objects vectorially (Fast Path)
+            if full_objs_count > 0:
+                full_segment_len = full_objs_count * stride
+                # Extract block: [7, full_len, D]
+                feats_full = selected_layers[:, i, start_all : start_all + full_segment_len, :]
+                # Reshape to separate objects: [7, N_full, stride, D]
+                feats_full = feats_full.view(7, full_objs_count, stride, -1)
+                
+                # Horizontal Aggregation: Mean pooling over stride (dim 2) -> [7, N_full, D]
+                feats_full_mean = feats_full.mean(dim=2)
+                
+                # Vertical Aggregation: Weighted sum over layers (dim 0) -> [N_full, D]
+                # layer_weights: [7] -> view as [7, 1, 1] for broadcasting
+                h_geo_full = (feats_full_mean * layer_weights.view(-1, 1, 1)).sum(dim=0)
+                obj_hidden_list.append(h_geo_full)
+            
+            # 2. Process partial last object if truncated (Corner Case)
+            if remainder > 0:
+                start_partial = start_all + full_objs_count * stride
+                # [7, remainder, D]
+                feats_partial = selected_layers[:, i, start_partial : actual_end_all, :]
+                # Mean pooling -> [7, D]
+                h_obj_partial = feats_partial.mean(dim=1)
+                # Weighted sum -> [D]
+                h_geo_partial = (h_obj_partial * layer_weights.view(-1, 1)).sum(dim=0)
+                obj_hidden_list.append(h_geo_partial.unsqueeze(0))
+            
+            if not obj_hidden_list:
+                continue
+                
+            # Combine all objects
+            obj_hidden = torch.cat(obj_hidden_list, dim=0) # [N_valid, D]
+            valid_count = obj_hidden.shape[0]
             # 预测坐标
             pred_coords = self.coord_head(obj_hidden) # [N_valid, 6]
             # 计算 MSE Loss
