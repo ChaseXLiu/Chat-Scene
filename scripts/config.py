@@ -2,8 +2,8 @@
 anno_root = "annotations"  # annotation dir
 pc_encoder = "uni3d"
 segmentor = "mask3d"
-version = "_mini_50pct" # 使用 部分 数据集快速验证
-# version = ""
+# version = "_mini_50pct" # 使用 部分 数据集快速验证
+version = ""
 
 gt_feat_file = f"{anno_root}/scannet_gt_{pc_encoder}_feats.pt"
 seg_feat_file = f"{anno_root}/scannet_{segmentor}_{pc_encoder}_feats.pt"
@@ -295,7 +295,7 @@ lora = dict(
 
 optimizer = dict(
     opt="adamW",
-    lr=5e-3,
+    lr=5e-6,
     opt_betas=[0.9, 0.999],  # default
     weight_decay=0.02,
     scaler_enable=False,
@@ -303,8 +303,8 @@ optimizer = dict(
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(
         enable=False,
-        module_names=["twin_transformer"],
-        lr=[5e-5],
+        module_names=["lora"],
+        lr=[1e-6],
         wd=[0.02]
     ),
 )

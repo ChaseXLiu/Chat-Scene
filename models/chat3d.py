@@ -89,6 +89,11 @@ class SpatialRelationAttention(nn.Module):
             nn.Linear(feat_dim // 4, num_heads), # 为每个头生成一个独立的 gate
             nn.Sigmoid() # 限制在 0~1 之间
         )
+        
+        # [新增] 初始化 Gate Net 使得初始输出接近 0
+        # 这样在训练初期，模型行为会接近 Baseline，避免突兀的空间特征注入干扰语言模型
+        nn.init.constant_(self.gate_net[-2].weight, 0)
+        nn.init.constant_(self.gate_net[-2].bias, -5.0) # Sigmoid(-5) ≈ 0.0067
 
     def forward(self, objects, positions, instr_embeds):
         """
@@ -867,7 +872,8 @@ class Chat3D(nn.Module):
 
         # 总损失
         # total_loss = outputs.loss + 1.0 * loss_coord + 1.0 * loss_align
-        total_loss = outputs.loss + 0.5 * loss_coord
+        # 降低辅助任务权重的初始值，避免掩盖主任务 Loss (QA performance drop)
+        total_loss = outputs.loss + 0.1 * loss_coord
 
         return dict(
             loss=total_loss,

@@ -1,8 +1,8 @@
-# nohup bash scripts/run.sh > output.log 2>&1 &
-# nohup bash -c "CUDA_VISIBLE_DEVICES=1 bash scripts/run.sh" > output.log 2>&1 &
-
 # conda activate chat-scene
 # CUDA_VISIBLE_DEVICES=1 bash scripts/run.sh
+
+# nohup bash scripts/run.sh > output.log 2>&1 &
+# nohup bash -c "CUDA_VISIBLE_DEVICES=1 bash scripts/run.sh" > output.log 2>&1 &
 
 # gpustat -ui
 # pkill -u lcx
@@ -25,7 +25,7 @@ add_scene_token=False
 no_obj=False
 input_dim=1024 # 1024
 bidirection=False
-different_lr=False
+different_lr=True
 max_obj_num=100
 lora_r=16
 lora_alpha=16
@@ -69,9 +69,9 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-pretrained_path="/data/lcx/chat-scene/outputs/ours_mini20251223_215938_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_00_7946.pth"
+# pretrained_path="/data/lcx/chat-scene/outputs/ours_mini20251223_215938_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_00_7946.pth"
 # pretrained_path="/data/lcx/chat-scene/outputs/baseline_mini20251122_112917_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_16764.pth"
-# pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
+pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_00_5029.pth"
 # pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251018_135615_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref__scanrefer#scan2cap#scanqa__chatscene/ckpt_00_23902.pth"
 # pretrained_path=""
