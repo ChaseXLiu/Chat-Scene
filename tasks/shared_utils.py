@@ -84,12 +84,12 @@ def setup_model(
             logger.info(f"Not found checkpoint in {config.output_dir}")
     
     if osp.isfile(config.img_projector_path):
-        img_projector_sd = torch.load(config.img_projector_path, map_location="cpu")
+        img_projector_sd = torch.load(config.img_projector_path, map_location="cpu", weights_only=False)
         msg = model_without_ddp.object_img_proj.load_state_dict(img_projector_sd)
         logger.info(f"Loaded pretrained image projector from {config.img_projector_path}.")
 
     if osp.isfile(config.pretrained_path):
-        checkpoint = torch.load(config.pretrained_path, map_location="cpu")
+        checkpoint = torch.load(config.pretrained_path, map_location="cpu", weights_only=False)
         state_dict = checkpoint["model"]
 
         if config.resume:
@@ -111,6 +111,24 @@ def setup_model(
         logger.info(f"Loaded checkpoint from {config.pretrained_path}.")
     else:
         logger.warning("No pretrained checkpoint provided, training from scratch.")
+
+    # if osp.isfile(config.get("stage1_checkpoint_path", "")):
+    #     logger.info(f"Loading stage1 checkpoint from {config.stage1_checkpoint_path}...")
+    #     stage1_checkpoint = torch.load(config.stage1_checkpoint_path, map_location="cpu")
+    #     stage1_state_dict = stage1_checkpoint["model"]
+        
+    #     keys_to_delete = []
+    #     for name, param in stage1_state_dict.items():
+    #         if name not in model_without_ddp.state_dict():
+    #             continue
+    #         if param.size() != model_without_ddp.state_dict()[name].size():
+    #             keys_to_delete.append(name)
+    #     for key in keys_to_delete:
+    #         del stage1_state_dict[key]
+        
+    #     msg = model_without_ddp.load_state_dict(stage1_state_dict, strict=False)
+    #     logger.info(msg)
+    #     logger.info(f"Loaded stage1 checkpoint from {config.stage1_checkpoint_path}.")
 
     return (
         model,

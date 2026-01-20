@@ -88,7 +88,7 @@ def init_llama_model(config):
             vicuna_weight = {}
             assert not llama_config.vicuna_weight_path[0].split(".")[-1] == "safetensor"
             for path in llama_config.vicuna_weight_path:
-                weights = torch.load(path, map_location=torch.device('cpu'))
+                weights = torch.load(path, map_location=torch.device('cpu'), weights_only=False)
                 vicuna_weight.update(weights)
             
             self.llama_model.load_state_dict(vicuna_weight,strict=False)

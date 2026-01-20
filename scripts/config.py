@@ -17,7 +17,7 @@ seg_train_attr_file = f"{anno_root}/scannet_{segmentor}_train_attributes.pt"
 seg_val_attr_file = f"{anno_root}/scannet_{segmentor}_val_attributes.pt"
 seg_all_attr_file = f"{anno_root}/scannet_{segmentor}_all_attributes.pt"
 seg_text_feat_file = f"{anno_root}/scannet_{segmentor}_obj_textfeat.pt"
-description_file = f"{anno_root}/object_descriptions_with_obj_tags.json" 
+# description_file = f"{anno_root}/object_descriptions_with_obj_tags.json" 
 
 train_tag = 'scanrefer#multi3dref#nr3d'
 val_tag = 'scanrefer#multi3dref#nr3d'
@@ -27,103 +27,122 @@ train_file_dict = {
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/scanrefer_{segmentor}_train{version}.json"
+        f"{anno_root}/scanrefer_{segmentor}_train{version}.json",
+        seg_text_feat_file,
+        1.0
     ],
     'scanrefer_location': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/scanrefer_{segmentor}_train_location{version}.json"
+        f"{anno_root}/scanrefer_{segmentor}_train_location{version}.json",
+        seg_text_feat_file,
     ],
     'nr3d_seg': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/nr3d_{segmentor}_train{version}.json"
+        f"{anno_root}/nr3d_{segmentor}_train{version}.json",
+        seg_text_feat_file,
     ],
     'sr3d_seg': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/sr3d_{segmentor}_train{version}.json"
+        f"{anno_root}/sr3d_{segmentor}_train{version}.json",
+        seg_text_feat_file,
     ],
     'nr3d': [
         gt_feat_file,
         gt_img_feat_file,
         gt_train_attr_file,
-        f"{anno_root}/nr3d_train{version}.json"
+        f"{anno_root}/nr3d_train{version}.json",
+        seg_text_feat_file,
     ],
     'sr3d': [
         gt_feat_file,
         gt_img_feat_file,
         gt_train_attr_file,
-        f"{anno_root}/sr3d_train{version}.json"
+        f"{anno_root}/sr3d_train{version}.json",
+        seg_text_feat_file,
     ],
     'scan2cap': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/scan2cap_{segmentor}_train{version}.json"
+        f"{anno_root}/scan2cap_{segmentor}_train{version}.json",
+        seg_text_feat_file,
     ],
     'scan2cap_location': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/scan2cap_{segmentor}_train_location{version}.json"
+        f"{anno_root}/scan2cap_{segmentor}_train_location{version}.json",
+        seg_text_feat_file,
     ],
     'nr3d_caption': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/nr3d_caption_{segmentor}_train{version}.json"
+        f"{anno_root}/nr3d_caption_{segmentor}_train{version}.json",
+        seg_text_feat_file,
     ],
     'obj_align': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/obj_align_{segmentor}_train{version}.json"
+        f"{anno_root}/obj_align_{segmentor}_train{version}.json",
+        seg_text_feat_file,
     ],
     'scanqa': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/scanqa_train.json"
+        f"{anno_root}/scanqa_train.json",
+        seg_text_feat_file,
+        2.0
     ],
     'sqa3d': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/sqa3d_train.json"
+        f"{anno_root}/sqa3d_train.json",
+        seg_text_feat_file,
     ],
     'multi3dref': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/multi3dref_{segmentor}_train{version}.json"
+        f"{anno_root}/multi3dref_{segmentor}_train{version}.json",
+        seg_text_feat_file,
     ],
     'multi3dref_location': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/multi3dref_{segmentor}_train_location{version}.json"
+        f"{anno_root}/multi3dref_{segmentor}_train_location{version}.json",
+        seg_text_feat_file,
     ],
     'scannet_caption': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
-        f"{anno_root}/scannet_caption_{segmentor}_train{version}.json"
+        f"{anno_root}/scannet_caption_{segmentor}_train{version}.json",
+        seg_text_feat_file,
     ],
     'scannet_region_caption': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
         f"{anno_root}/scannet_region_caption_{segmentor}_train{version}.json",
+        seg_text_feat_file,
     ],
     'object_descriptions': [
         seg_feat_file,
         seg_img_feat_file,
         seg_train_attr_file,
         f"{anno_root}/object_descriptions_with_obj_tags{version}.json",
+        seg_text_feat_file,
     ],
 }
 
@@ -227,7 +246,7 @@ val_file_dict = {
 }
 
 
-num_workers = 16
+num_workers = 32
 batch_size = 32
 
 
@@ -249,7 +268,7 @@ model = dict(
     add_scene_token=True,
     add_img_token=True,
     use_lora=True,
-    train_emb=True,
+    train_emb=False,
     train_img_proj=True,
     train_spatial_attn=True,
     no_obj=False,
@@ -260,6 +279,7 @@ model = dict(
     fuse_with_id=False,
     use_objid=True,
     use_location_token=False,
+    stage=1
 )
 
 lora = dict(
@@ -302,10 +322,10 @@ optimizer = dict(
     max_grad_norm=5,  # requires a positive float, use -1 to disable
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(
-        enable=False,
-        module_names=["lora"],
-        lr=[1e-6],
-        wd=[0.02]
+        enable=True,
+        module_names=["spatial_relation_attention", "coord_head", "geo_layer_weights", "distill_proj", "fusion_gate", "object_proj", "object_img_proj"], 
+        lr=[2e-5, 2e-5, 2e-5, 2e-5, 2e-5, 2e-5, 2e-5], 
+        wd=[0.02, 0.02, 0, 0.02, 0.02, 0.02, 0.02]
     ),
 )
 
@@ -334,7 +354,8 @@ save_latest = False
 do_save = True
 auto_resume = True
 pretrained_path = ""
+stage1_checkpoint_path = "/data/lcx/chat-scene/outputs/ours_mini20251230_115935_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_00_14684.pth"
 img_projector_path = ""
 
 debug=False
-gpu_num=1
+gpu_num=2

@@ -45,7 +45,7 @@ class ValDataset(BaseDataset):
                 self.scene_feats = self.feats
                 self.scene_img_feats = self.scene_masks = None
             else:
-                self.scene_feats, self.scene_img_feats, self.scene_masks = self.prepare_scene_features()
+                self.scene_feats, self.scene_img_feats, self.scene_masks, _ = self.prepare_scene_features()
             ValDataset.cached_feats[feat_file] = (self.scene_feats, self.scene_masks)
             ValDataset.cached_feats[img_feat_file] = self.scene_img_feats
 
@@ -53,7 +53,7 @@ class ValDataset(BaseDataset):
         return len(self.anno)
 
     def __getitem__(self, index):
-        scene_id, scene_feat, scene_img_feat, scene_mask, scene_locs, assigned_ids = self.get_anno(index)
+        scene_id, scene_feat, scene_img_feat, scene_mask, scene_locs, assigned_ids, scene_text_feat = self.get_anno(index)
         obj_id = int(self.anno[index].get('obj_id', 0))
         pred_id = int(self.anno[index].get('pred_id', 0))
         type_info = int(self.anno[index].get('sqa_type', 0))

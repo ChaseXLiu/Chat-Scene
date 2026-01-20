@@ -1,4 +1,5 @@
 # conda activate chat-scene
+# CUDA_VISIBLE_DEVICES=0 bash scripts/run.sh
 # CUDA_VISIBLE_DEVICES=1 bash scripts/run.sh
 
 # nohup bash scripts/run.sh > output.log 2>&1 &
@@ -15,10 +16,11 @@ export MASTER_PORT=$((54000 + $RANDOM % 10000))
 export MASTER_ADDR=localhost
 
 epoch=3
-batch_size=8
+batch_size=16
 lr=5e-6
-train_emb=True
-train_img_proj=False
+# lr=5e-7
+train_emb=False
+train_img_proj=True
 train_spatial_attn=True
 add_img_token=True
 add_scene_token=False
@@ -32,12 +34,13 @@ lora_alpha=16
 add_pos_emb=False
 feat_fusion=False
 fuse_with_id=False
-config="/home/lcx/chat-scene/Chat-Scene/scripts/"
+config="/data/ZXMIC/mic_lcx/Chat-Scene/Chat-Scene/scripts/"
 max_grad_norm=0.01
 seed=42
 use_location_token=False
+stage=2
 
-llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsys--vicuna-7b-v1.5"
+llama_model_path="/data/ZXMIC/mic_lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsys--vicuna-7b-v1.5"
 
 # train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref"
 # val_tag="scanrefer#multi3dref#scan2cap#scanqa"
@@ -47,7 +50,7 @@ llama_model_path="/home/lcx/HuggingFace-Download-Accelerator/hf_hub/models--lmsy
 
 train_tag="scanrefer#obj_align#nr3d_caption#scanqa"
 val_tag="scanrefer#scanqa"
-# train_tag="object_descriptions"
+
 
 
 # evaluate=True
@@ -62,23 +65,19 @@ if [ $debug = "True" ]; then
 else
     # enable_wandb=True
     enable_wandb=False
-    gpu_num=1
+    gpu_num=2
     do_save=True
     other_info="chatscene"
 fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-# pretrained_path="/data/lcx/chat-scene/outputs/ours_mini20251223_215938_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_00_7946.pth"
-# pretrained_path="/data/lcx/chat-scene/outputs/baseline_mini20251122_112917_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_02_16764.pth"
-pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
-# pretrained_path="/home/lcx/chat-scene/Chat-Scene/pretrained_models/ckpt_00_5029.pth"
-# pretrained_path="/home/lcx/chat-scene/Chat-Scene/outputs/20251018_135615_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref__scanrefer#scan2cap#scanqa__chatscene/ckpt_00_23902.pth"
-# pretrained_path=""
+# pretrained_path="/data/ZXMIC/mic_lcx/Chat-Scene/Chat-Scene/pretrained_models/our_ckpt_00_7649.pth"
+pretrained_path="/data/ZXMIC/mic_lcx/Chat-Scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 
 
 # OUTPUT_DIR=outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
-OUTPUT_DIR=/data/lcx/chat-scene/outputs/ours_mini"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
+OUTPUT_DIR=/data/ZXMIC/mic_lcx/Chat-Scene/Chat-Scene/outputs/"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
 # OUTPUT_DIR=/data/lcx/chat-scene/outputs/ours"$(date +"%Y%m%d_%H%M%S")"_lr"$lr"_ep"$epoch"_"$tag"
 mkdir -p ${OUTPUT_DIR}
 
@@ -115,10 +114,24 @@ ARGS=(
     model.fuse_with_id "$fuse_with_id"
     model.llama_model_path "$llama_model_path"
     model.use_location_token "$use_location_token"
+    model.stage "$stage"
 )
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     # srun --partition=mozi-S1 --gres=gpu:${gpu_num} --ntasks-per-node=${gpu_num} --kill-on-bad-exit --quotatype=reserved \
-    python tasks/train.py "${ARGS[@]}"
+    
+    if [ "$gpu_num" -gt 1 ]; then
+        # Multi-GPU training
+        # Generate device string (e.g., "0,1" for 2 GPUs)
+        devices=$(seq -s, 0 $(($gpu_num - 1)))
+        export CUDA_VISIBLE_DEVICES=$devices
+        echo "Running on $gpu_num GPUs (CUDA_VISIBLE_DEVICES=$devices) with torchrun..."
+        torchrun --nproc_per_node=${gpu_num} --master_port=${MASTER_PORT} tasks/train.py "${ARGS[@]}"
+    else
+        # Single-GPU training
+        export CUDA_VISIBLE_DEVICES=0
+        echo "Running on single GPU (CUDA_VISIBLE_DEVICES=0) with python..."
+        python tasks/train.py "${ARGS[@]}"
+    fi
 fi
 

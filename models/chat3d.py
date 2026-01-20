@@ -53,13 +53,20 @@ def print_grad_status(model):
 class SpatialRelationAttention(nn.Module):
     """
     指令感知的 3D 空间关系注意力模块
-    Instruction-Guided Geometric Gating
+    Args:
+            feat_dim (int): 物体特征维度
+            pos_dim (int): 相对位置特征维度 (默认5)
+            num_heads (int): 注意力头数
+            instr_dim (int): 指令文本特征维度
     """
     def __init__(self, feat_dim=1024, pos_dim=5, num_heads=8, 
-                 spatial_multihead=True, instr_dim=4096): # [新增] instr_dim
+                 spatial_multihead=True, instr_dim=4096):
         """
         Args:
-            instr_dim (int): 指令文本特征的维度 (例如 LLaMA hidden size)
+            feat_dim (int): 物体特征维度
+            pos_dim (int): 相对位置特征维度 (默认5)
+            num_heads (int): 注意力头数
+            instr_dim (int): 指令文本特征维度
         """
         super(SpatialRelationAttention, self).__init__()
         self.feat_dim = feat_dim
@@ -67,58 +74,63 @@ class SpatialRelationAttention(nn.Module):
         self.head_dim = feat_dim // num_heads
         self.spatial_multihead = spatial_multihead
 
-        # QKV
+        # ---- 标准 Attention QKV ----
         self.w_qs = nn.Linear(feat_dim, feat_dim)
         self.w_ks = nn.Linear(feat_dim, feat_dim)
         self.w_vs = nn.Linear(feat_dim, feat_dim)
 
-        # 输出层
+        # ---- 输出层 ----
         self.fc = nn.Linear(feat_dim, feat_dim)
         self.dropout = nn.Dropout(p=0.1)
         self.layer_norm = nn.LayerNorm(feat_dim)
 
-        # 用于计算 l_i
+        # ---- 空间特征投影 (用于计算 l_i) ----
         self.w_p = nn.Linear(3 + feat_dim, pos_dim, bias=False)
         
-        # [新增] 门控生成网络 (Gate Network)
-        # 输入：指令特征 [B, instr_dim]
-        # 输出：每个注意力头的门控值 [B, num_heads]
+        # 空间头数设置
+        self.spatial_n_head = num_heads if spatial_multihead else 1
+
+        # ---- [保留代码2] 门控生成网络 (Gate Network) ----
+        # 用于判断当前指令是否需要空间关系参与
         self.gate_net = nn.Sequential(
             nn.Linear(instr_dim, feat_dim // 4),
             nn.ReLU(),
-            nn.Linear(feat_dim // 4, num_heads), # 为每个头生成一个独立的 gate
-            nn.Sigmoid() # 限制在 0~1 之间
+            nn.Linear(feat_dim // 4, num_heads), 
+            nn.Sigmoid() # 输出 0~1 的门控值
         )
         
-        # [新增] 初始化 Gate Net 使得初始输出接近 0
-        # 这样在训练初期，模型行为会接近 Baseline，避免突兀的空间特征注入干扰语言模型
-        nn.init.constant_(self.gate_net[-2].weight, 0)
-        nn.init.constant_(self.gate_net[-2].bias, -5.0) # Sigmoid(-5) ≈ 0.0067
+        # 初始化
+        nn.init.xavier_uniform_(self.gate_net[-2].weight, gain=0.01)
+        nn.init.constant_(self.gate_net[-2].bias, 0.0) 
+        nn.init.normal_(self.fc.weight, mean=0.0, std=1e-5)
 
     def forward(self, objects, positions, instr_embeds):
         """
         Args:
             objects: [B, N, D]  物体特征
             positions: [B, N, 3] 物体坐标
-            instr_embeds: [B, D_instr] 指令特征 (Sentence Embedding)
+            instr_embeds: [B, D_instr] 指令特征
         """
         B, N, D = objects.shape
         residual = objects
 
-        # ---- Q, K, V ----
+        # 1. ---- 标准 QKV 计算 ----
         q = einops.rearrange(self.w_qs(objects), 'b l (h d) -> h b l d', h=self.num_heads)
         k = einops.rearrange(self.w_ks(objects), 'b l (h d) -> h b l d', h=self.num_heads)
         v = einops.rearrange(self.w_vs(objects), 'b l (h d) -> h b l d', h=self.num_heads)
 
-        # ---- 语义 attention logits ----
-        attn_logits = torch.einsum('hblk,hbtk->hblt', q, k) / np.sqrt(q.shape[-1])  
+        # 计算语义 Attention Score (Softmax 之前)
+        attn_logits = torch.einsum('hblk,hbtk->hblt', q, k) / np.sqrt(q.shape[-1]) 
+        
+        # **关键点**: 代码3的逻辑是在 Softmax 之后做乘法，所以这里先做 Softmax
+        attn_probs = torch.softmax(attn_logits, dim=-1) # [H, B, N, N]
 
-        # ---- 计算 pairwise 空间特征 s_ij ----
+        # 2. ---- 空间关系矩阵构建 (同代码2/3) ----
         pos1 = positions.unsqueeze(2)  # [B, N, 1, 3]
         pos2 = positions.unsqueeze(1)  # [B, 1, N, 3]
         delta = pos2 - pos1            # [B, N, N, 3]
 
-        d_ij = torch.norm(delta, dim=-1)  
+        d_ij = torch.norm(delta, dim=-1)
         theta_h = torch.atan2(delta[..., 1], delta[..., 0] + 1e-8)
         theta_v = torch.asin(delta[..., 2] / (d_ij + 1e-8))
 
@@ -128,51 +140,58 @@ class SpatialRelationAttention(nn.Module):
             d_ij
         ], dim=-1)  # [B, N, N, 5]
 
-        # ---- l_i ----
+        # 3. ---- 计算 Spatial Bias (l_i * s_ij) ----
         pos_exp = positions.unsqueeze(2).expand(-1, -1, N, -1)
         obj_exp = objects.unsqueeze(1).expand(-1, N, -1, -1)
         pos_obj = torch.cat([pos_exp, obj_exp], dim=-1) 
 
         l_i = self.w_p(pos_obj) 
-
-        # ---- 空间 logits ----
+        
         # [B, N, N]
         spatial_bias = torch.sum(l_i * s_ij, dim=-1) 
         
-        # 扩展维度以匹配多头: [num_heads, B, N, N]
-        spatial_bias = spatial_bias.unsqueeze(0).expand(self.num_heads, -1, -1, -1)
+        # 扩展到多头 [H, B, N, N]
+        spatial_bias = spatial_bias.unsqueeze(0).expand(self.spatial_n_head, -1, -1, -1)
+        if not self.spatial_multihead:
+             spatial_bias = einops.repeat(spatial_bias, 'h b l t -> (h nh) b l t', nh=self.num_heads)
 
-        # ==========================================
-        # [新增] 计算动态门控 (Dynamic Gating)
-        # ==========================================
+        # 4. ---- [核心融合逻辑] Gate控制的乘法融合 ----
         
-        # 1. 计算 Gate 值
-        # input: [B, D_instr] -> output: [B, num_heads]
+        # (A) 计算空间掩码 (Code 3 逻辑: Sigmoid)
+        # 范围 (0~1)，0表示不相关（被过滤），1表示相关
+        spatial_mask = torch.sigmoid(spatial_bias) 
+
+        # (B) 计算 Gate 值 (Code 2 逻辑)
+        # [B, instr_dim] -> [B, num_heads]
         gate_values = self.gate_net(instr_embeds) 
         
-        # 2. 调整维度以便广播 (Broadcasting)
-        # 目标形状: [num_heads, B, 1, 1] 以便乘以 [num_heads, B, N, N]
-        gate_values = gate_values.transpose(0, 1) # [num_heads, B]
-        gate_values = gate_values.unsqueeze(-1).unsqueeze(-1) # [num_heads, B, 1, 1]
+        # 调整维度以便广播: [num_heads, B, 1, 1]
+        gate_broadcast = gate_values.transpose(0, 1).unsqueeze(-1).unsqueeze(-1)
         
-        # 3. 动态融合
-        # 如果问题是 "Where is...", gate 趋近 1，空间关系被注入。
-        # 如果问题是 "What color...", gate 趋近 0，空间关系被抑制。
-        fused_logits = attn_logits + gate_values * spatial_bias
+        # (C) 动态插值融合
+        # 逻辑说明:
+        # 如果 gate = 1 (强空间指令): effective_mask = spatial_mask (完全启用过滤)
+        # 如果 gate = 0 (非空间指令): effective_mask = 1.0 (全通，不进行过滤)
+        # effective_mask = gate * mask + (1 - gate) * 1.0
+        effective_mask = gate_broadcast * spatial_mask + (1.0 - gate_broadcast)
+        
+        # (D) 应用掩码 (乘法)
+        fused_attn = attn_probs * effective_mask
 
-        # ==========================================
+        # (E) 重新归一化 (SigSoftmax 的必要步骤)
+        # 因为乘法破坏了 Softmax 的总和为1的性质，必须重新归一化
+        fused_attn = fused_attn / (torch.sum(fused_attn, dim=-1, keepdim=True) + 1e-8)
 
-        attn = torch.softmax(fused_logits, dim=-1)
-
-        # ---- 加权求和 ----
-        output = torch.einsum('hblt,hbtv->hblv', attn, v)
+        # 5. ---- 输出计算 ----
+        output = torch.einsum('hblt,hbtv->hblv', fused_attn, v)
         output = einops.rearrange(output, 'h b l d -> b l (h d)')
 
-        # ---- 残差 & Norm ----
         output = self.dropout(self.fc(output))
         output = self.layer_norm(output + residual)
 
-        return output
+        # 返回 output 和 gate_values (用于可能的辅助 Loss 监督)
+        # gate_values shape: [B, num_heads]
+        return output, gate_values
 
 
 class Chat3D(nn.Module):
@@ -206,9 +225,17 @@ class Chat3D(nn.Module):
         self.fuse_with_id = config.model.fuse_with_id
         self.use_location_token = config.model.use_location_token
 
-        # 空间多层级特征分组配置
-        initial_weights = torch.tensor([0.5, 0.3, 0.2])  # 三层级权重
-        self.multi_scale_weights = nn.Parameter(initial_weights)
+        # # 空间多层级特征分组配置
+        # initial_weights = torch.tensor([0.5, 0.3, 0.2])  # 三层级权重
+        # self.multi_scale_weights = nn.Parameter(initial_weights)
+
+        # [新增] 融合权重的生成网络
+        # 输入 3072 (1024*3)，输出 3 (三个层级的权重)
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(1024 * 3, 512),
+            nn.ReLU(),
+            nn.Linear(512, 3)
+        )
 
         self.debug = config.debug
         if not self.debug:
@@ -270,16 +297,20 @@ class Chat3D(nn.Module):
                 )
                 self.llama_model = get_peft_model(self.llama_model, lora_config)
                 self.llama_model.print_trainable_parameters()
-                self.llama_model.model.lm_head.weight.requires_grad = True
+                # 冻结输出头 (LM Head)
+                self.llama_model.model.lm_head.weight.requires_grad = False
                 self.llama_model.model.lm_head.weight.data = self.llama_model.model.lm_head.weight.data.float()
                 self.llama_model.print_trainable_parameters()
-                self.llama_model.model.model.embed_tokens.weight.requires_grad = True
+                # 冻结词表嵌入 (Embedding)
+                self.llama_model.model.model.embed_tokens.weight.requires_grad = False
                 self.llama_model.model.model.embed_tokens.weight.data = self.llama_model.model.model.embed_tokens.weight.data.float()
                 self.llama_model.print_trainable_parameters()
             else:
-                self.llama_model.lm_head.weight.requires_grad = True
+                # 冻结输出头 (LM Head)
+                self.llama_model.lm_head.weight.requires_grad = False
                 self.llama_model.lm_head.weight.data = self.llama_model.lm_head.weight.data.float()
-                self.llama_model.model.embed_tokens.weight.requires_grad = True
+                # 冻结词表嵌入 (Embedding)
+                self.llama_model.model.embed_tokens.weight.requires_grad = False
                 self.llama_model.model.embed_tokens.weight.data = self.llama_model.model.embed_tokens.weight.data.float()
             
             self.llama_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
@@ -313,8 +344,13 @@ class Chat3D(nn.Module):
             nn.GELU(),
             nn.Linear(self.llama_dim, self.llama_dim)
         )
-
         
+        # [新增] 蒸馏投影层 (4096 -> 768)
+        # Innovation C: Project Visual -> Text Space for effective distillation
+        # Use a SINGLE Linear layer to limit its capacity. 
+        # This forces the upstream `proj_object_embed` to learn semantic structure
+        # because a simple linear layer cannot fix complex semantic misalignment.
+        self.distill_proj = nn.Linear(self.llama_dim, 768)
 
         # tt_hidden_dim = getattr(config.model, "tt_hidden_dim", 768)
         # tt_layers = getattr(config.model, "tt_layers", 2)
@@ -338,10 +374,10 @@ class Chat3D(nn.Module):
         if not self.train_img_proj:
             for p in self.object_img_proj.parameters():
                 p.requires_grad = False
-        self.pos_embedding = PositionEmbeddingCoordsSine(d_pos=self.pos_dim)
-        self.pos_proj = nn.Sequential(
-            nn.Linear(self.pos_dim, self.llama_dim)
-        )
+        # self.pos_embedding = PositionEmbeddingCoordsSine(d_pos=self.pos_dim)
+        # self.pos_proj = nn.Sequential(
+        #     nn.Linear(self.pos_dim, self.llama_dim)
+        # )
 
         # [新增] 创新点 B: 几何辅助任务头 (Geometry-Aware Auxiliary Task Head)
         # 用于从 Object Token 隐状态预测坐标 (x, y, z)
@@ -394,6 +430,41 @@ class Chat3D(nn.Module):
             self.p_0_embed, self.p_1_embed = self.prepare_fixed_embed()
         self.last_embed = None
         
+        # ==========================================
+        # [分阶段训练逻辑 Curriculum Learning]
+        # ==========================================
+        # stage 1: Geometric Warmup (只训练 IAGF 和 几何辅助头)
+        # stage 2: Joint Finetuning (训练 LoRA, Projectors, IAGF, 几何辅助头)
+        # self.stage = getattr(config.model, 'stage', 2)
+        
+        # if self.stage == 1:
+        #     logger.info(">>> [Stage 1] Geometric Warmup: Freezing LLaMA, LoRA, and Projectors.")
+            
+        #     # 1. 首先冻结所有参数
+        #     for p in self.parameters():
+        #         p.requires_grad = False
+                
+        #     # 2. 解冻 IAGF (Spatial Relation Attention)
+        #     for p in self.spatial_relation_attention.parameters():
+        #         p.requires_grad = True
+                
+        #     # 3. 解冻 几何辅助头 (Auxiliary Head)
+        #     for p in self.coord_head.parameters():
+        #         p.requires_grad = True
+        #     self.geo_layer_weights.requires_grad = True
+            
+        #     # (Projectors 已经在第一步被冻结了)
+            
+        # else:
+        #     logger.info(">>> [Stage 2] Joint Finetuning: Training LoRA, IAGF, Aux Head, and Projectors.")
+        #     # 默认流程已经正确设置了 LoRA 和 Projectors 的梯度 (在上面的 init 代码中)
+        #     # 我们只需要确保新模块是可训练的
+        #     for p in self.spatial_relation_attention.parameters():
+        #         p.requires_grad = True
+        #     for p in self.coord_head.parameters():
+        #         p.requires_grad = True
+        #     self.geo_layer_weights.requires_grad = True
+
         # print_grad_status(self)
 
     def get_objid_embeds(self):
@@ -492,10 +563,33 @@ class Chat3D(nn.Module):
     #     fused_feat = torch.nn.functional.normalize(fused_feat, dim=-1)
     #     return fused_feat, img_feat
 
+    # def encode_object_feat(self, feat, img_feat, locs):
+    #     feat = torch.nn.functional.normalize(feat, dim=-1)
+    #     img_feat = torch.nn.functional.normalize(img_feat, dim=-1)
+    #     return feat, img_feat
+
     def encode_object_feat(self, feat, img_feat, locs):
         feat = torch.nn.functional.normalize(feat, dim=-1)
         img_feat = torch.nn.functional.normalize(img_feat, dim=-1)
-        return feat, img_feat
+        
+        # 1. 切分特征
+        chunks = torch.split(feat, 1024, dim=-1) # tuple of (B, N, 1024)
+        stack_feats = torch.stack(chunks, dim=2) # [B, N, 3, 1024]
+        
+        # 2. 计算动态权重 (Dynamic Gating)
+        # 输入原始的大向量 feat [B, N, 3072]
+        weights = self.fusion_gate(feat) # [B, N, 3]
+        weights = F.softmax(weights, dim=-1) # 归一化权重
+        
+        # 3. 加权融合
+        # weights: [B, N, 3] -> [B, N, 3, 1] 以便广播
+        # stack_feats: [B, N, 3, 1024]
+        fused_feat = (stack_feats * weights.unsqueeze(-1)).sum(dim=2) # [B, N, 1024]
+        
+        # 4. 再次归一化 (Good practice for inputs to Transformer/LLM)
+        fused_feat = torch.nn.functional.normalize(fused_feat, dim=-1)
+        
+        return fused_feat, img_feat
 
     @staticmethod
     def get_dist_attention(pos, dist_exp=1):
@@ -624,7 +718,7 @@ class Chat3D(nn.Module):
         maxs = masked_xyz_max.max(dim=1)[0]
         return mins, maxs
 
-    def forward_train(self, scene_feat, scene_img_feat, scene_locs, scene_mask, obj_ids, assigned_ids, questions, answers, is_eval=False, description_embeds=None, **kwargs):
+    def forward_train(self, scene_feat, scene_img_feat, scene_locs, scene_mask, obj_ids, assigned_ids, questions, answers, is_eval=False, description_embeds=None, task_types=None, **kwargs):
         """3D场景对话模型的训练前向传播
         核心流程:
         1. 多模态特征编码 → 2. 空间位置处理 → 3. 注意力机制 → 4. 文本生成
@@ -638,6 +732,11 @@ class Chat3D(nn.Module):
             questions: 问题文本列表 [bs]
             answers: 答案文本列表 [bs]
             description_embeds: [新增] 离线提取的物体描述特征 [bs, num_objs, feat_dim] (Innovation C)
+            task_types: [新增] 数据集类型标记 [bs], 用于门控监督 (Innovation A+)
+                        1: ScanRefer (Localization) -> Force Gate Open
+                        2: ScanQA (QA) -> Neutral / Weak Open
+                        3: Multi3DRefer -> Force Gate Open
+                        4: Scan2Cap -> Force Gate Open
         返回:
             包含各项损失的字典
         """      
@@ -645,6 +744,7 @@ class Chat3D(nn.Module):
         object_embed, object_img_embed = self.encode_object_feat(scene_feat, scene_img_feat, scene_locs)
         device = object_embed.device
         batch_size = object_embed.shape[0]
+        description_embeds = kwargs["scene_text_feat"]
 
         # 预处理所有文本提示
         prompts = [f"{q} {self.role[1]}: " for q in questions]
@@ -665,7 +765,7 @@ class Chat3D(nn.Module):
         instr_embeds = sum_embeddings / sum_mask # [B, D]
 
         # 注入空间信息特征
-        object_embed = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
+        object_embed, gate_values = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
         object_embed = torch.nn.functional.normalize(object_embed, dim=-1)
 
         proj_object_embed = self.object_proj(object_embed)
@@ -705,11 +805,9 @@ class Chat3D(nn.Module):
             if num_valid_objs > 0:
                 # 计算步长 stride
                 stride = obj_seq_len // num_valid_objs
-
                 # 获取有效物体的 ID (对应 scene_feat/scene_locs 的索引)
                 valid_ids = torch.where(scene_mask[i])[0]
                 valid_assigned_ids = assigned_ids[i][valid_ids]
-
                 # 获取对应的真实坐标
                 target_locs = scene_locs[i][valid_assigned_ids] # [N_valid, 6]
 
@@ -769,117 +867,131 @@ class Chat3D(nn.Module):
         # ==========================================
         # [新增] 创新点 B: 计算几何辅助任务损失 (Coordinate Regression Loss)
         # ==========================================
-        # Dual-Aggregation Strategy:
-        # 1. 提取 Layer 18-24 的 Hidden States
-        # outputs.hidden_states 是 tuple, index 18 对应 Layer 18 的输出 (假设 index 0 是 embedding)
-        selected_layers = torch.stack(outputs.hidden_states[18:25], dim=0) # [7, B, L, D]
-        
-        # 计算层级权重
+        selected_layers = torch.stack(outputs.hidden_states[18:25], dim=0) # [7, B, L, D]        
         layer_weights = torch.softmax(self.geo_layer_weights, dim=0) # [7]
-
         loss_coord = torch.tensor(0.0, device=device)
         total_valid_objs = 0
-
-        for i in range(batch_size):
-            indices = batch_obj_indices[i]
-            target_locs = batch_target_coords[i]
-            if not indices:
-                continue
+        
+        if stride > 0:
+            all_batch_indices = []
+            all_seq_indices = []
+            all_target_coords = []            
+            offset = torch.arange(stride, device=device)            
+            for i in range(batch_size):
+                num_valid = scene_mask[i].sum().item()
+                if num_valid == 0: continue
+                obj_starts = torch.arange(num_valid, device=device) * stride + p_0_len
+                seq_idx = obj_starts.unsqueeze(1) + offset.unsqueeze(0)
+                valid_obj_mask = seq_idx[:, -1] < max_seq_len
+                if not valid_obj_mask.any(): continue
+                valid_seq_idx = seq_idx[valid_obj_mask]
+                all_seq_indices.append(valid_seq_idx)
+                all_batch_indices.append(torch.full((valid_seq_idx.shape[0],), i, device=device, dtype=torch.long))
+                all_target_coords.append(batch_target_coords[i][valid_obj_mask])
             
-            # Optimize: Vectorized processing instead of loop over objects
-            # indices are contiguous: [start, start+stride), [start+stride, start+2*stride), ...
-            start_all = indices[0][0]
-            stride = indices[0][1] - indices[0][0]
-            
-            if start_all >= max_seq_len:
-                continue
-
-            # Determine valid range considering max_seq_len
-            requested_end = indices[-1][1]
-            actual_end_all = min(requested_end, max_seq_len)
-            
-            valid_len = actual_end_all - start_all
-            if valid_len <= 0:
-                continue
-
-            # Calculate how many full objects we have
-            full_objs_count = valid_len // stride
-            remainder = valid_len % stride
-            
-            obj_hidden_list = []
-            
-            # 1. Process full objects vectorially (Fast Path)
-            if full_objs_count > 0:
-                full_segment_len = full_objs_count * stride
-                # Extract block: [7, full_len, D]
-                feats_full = selected_layers[:, i, start_all : start_all + full_segment_len, :]
-                # Reshape to separate objects: [7, N_full, stride, D]
-                feats_full = feats_full.view(7, full_objs_count, stride, -1)
+            if all_batch_indices:
+                flat_batch_idx = torch.cat(all_batch_indices) # [Total_Objs]
+                flat_seq_idx = torch.cat(all_seq_indices)     # [Total_Objs, stride]
+                flat_targets = torch.cat(all_target_coords)   # [Total_Objs, 6]
                 
-                # Horizontal Aggregation: Mean pooling over stride (dim 2) -> [7, N_full, D]
-                feats_full_mean = feats_full.mean(dim=2)
-                
-                # Vertical Aggregation: Weighted sum over layers (dim 0) -> [N_full, D]
-                # layer_weights: [7] -> view as [7, 1, 1] for broadcasting
-                h_geo_full = (feats_full_mean * layer_weights.view(-1, 1, 1)).sum(dim=0)
-                obj_hidden_list.append(h_geo_full)
-            
-            # 2. Process partial last object if truncated (Corner Case)
-            if remainder > 0:
-                start_partial = start_all + full_objs_count * stride
-                # [7, remainder, D]
-                feats_partial = selected_layers[:, i, start_partial : actual_end_all, :]
-                # Mean pooling -> [7, D]
-                h_obj_partial = feats_partial.mean(dim=1)
-                # Weighted sum -> [D]
-                h_geo_partial = (h_obj_partial * layer_weights.view(-1, 1)).sum(dim=0)
-                obj_hidden_list.append(h_geo_partial.unsqueeze(0))
-            
-            if not obj_hidden_list:
-                continue
-                
-            # Combine all objects
-            obj_hidden = torch.cat(obj_hidden_list, dim=0) # [N_valid, D]
-            valid_count = obj_hidden.shape[0]
-            # 预测坐标
-            pred_coords = self.coord_head(obj_hidden) # [N_valid, 6]
-            # 计算 MSE Loss
-            curr_target = target_locs[:valid_count]
-            
-            loss_coord += F.mse_loss(pred_coords, curr_target, reduction='sum')
-            total_valid_objs += valid_count
+                total_valid_objs = flat_targets.shape[0]
+                flat_batch_idx_expanded = flat_batch_idx.unsqueeze(1).expand(-1, stride)     
 
-        if total_valid_objs > 0:
-            loss_coord = loss_coord / total_valid_objs
+                geo_features_list = []
+                for l in range(7):
+                    geo_features_list.append(selected_layers[l][flat_batch_idx_expanded, flat_seq_idx])
+                
+                feats_full = torch.stack(geo_features_list, dim=0)                
+                feats_mean = feats_full.mean(dim=2)                
+                h_geo = (feats_mean * layer_weights.view(-1, 1, 1)).sum(dim=0)                
+                pred_coords = self.coord_head(h_geo) # [Total_Objs, 6]
+                loss_coord = F.mse_loss(pred_coords, flat_targets, reduction='sum')
+                
+                if total_valid_objs > 0:
+                    loss_coord = loss_coord / total_valid_objs
 
         # ==========================================
         # [新增] 创新点 C: 基于对齐的描述增强 (Alignment-based Description Enhancement)
         # ==========================================
-        # loss_align = torch.tensor(0.0, device=device)
-        # if description_embeds is not None:
-        #     # description_embeds: [B, N, D]
-        #     # proj_object_embed: [B, N, D]
-        #     # 确保 description_embeds 在正确的设备上
-        #     description_embeds = description_embeds.to(device)
-        #     # 扩展 mask 以匹配维度
-        #     mask = scene_mask.unsqueeze(-1) # [B, N, 1]           
-        #     # 计算 MSE Loss (只计算有效物体)
-        #     diff = (proj_object_embed - description_embeds) * mask
-        #     # 避免除以 0
-        #     num_valid = mask.sum()
-        #     if num_valid > 0:
-        #         loss_align = (diff ** 2).sum() / (num_valid * diff.shape[-1])
+        loss_align = torch.tensor(0.0, device=device)
+        if description_embeds is not None:
+            # description_embeds: [B, N, 768]
+            # proj_object_embed: [B, N, 4096]
+            # 确保 description_embeds 在正确的设备上
+            description_embeds = description_embeds.to(device)
+
+            # print(description_embeds)
+            
+            # [Debug] Check for all-zero description_embeds
+            # if description_embeds.abs().sum() < 1e-6:
+            #     logger.warning(f"[Warning] description_embeds is all zeros! This explains the loss_align value.")
+            
+            # [Fix] Project visual embeds to match text dim (4096 -> 768)
+            # 这强迫 visual features 包含 text 语义，是真正的知识蒸馏
+            proj_visual_in_text_space = self.distill_proj(proj_object_embed)
+            
+            # 扩展 mask 以匹配维度
+            mask = scene_mask.unsqueeze(-1) # [B, N, 1]           
+            # 计算 MSE Loss (只计算有效物体)
+            # description_embeds 是固定的 Teacher
+            diff = (proj_visual_in_text_space - description_embeds) * mask
+            # 避免除以 0
+            num_valid = mask.sum()
+            if num_valid > 0:
+                loss_align = (diff ** 2).sum() / (num_valid * diff.shape[-1])
+
+        # ==========================================
+        # [新增] 门控监督损失 (Gate Supervision Loss)
+        # ==========================================
+        loss_gate = torch.tensor(0.0, device=device)
+        if task_types is not None:
+            # task_types 应该是一个张量 [B]
+            if isinstance(task_types, list):
+                 task_types = torch.tensor(task_types, device=device)
+            
+            # 定义目标门控值
+            # 类型 1 (ScanRefer)、3 (Multi3DRefer) -> 目标 0.9 (强空间)
+            # 类型 2 (ScanQA)、4 (Scan2Cap)、5（SQA3D） -> 目标 0.5 (中性/混合)
+            # 其他 -> 忽略
+            
+            gate_targets = torch.zeros_like(gate_values)
+            gate_mask = torch.zeros_like(gate_values) # 1 表示监督，0 表示忽略
+            
+            # 创建掩码
+            is_spatial = (task_types == 1) | (task_types == 3)
+            is_qa = (task_types == 2) | (task_types == 4)| (task_types == 5)
+            
+            # 设置目标
+            # 空间任务：强制门控打开 (0.9)
+            gate_targets[is_spatial] = 0.9
+            gate_mask[is_spatial] = 1.0
+            
+            # QA 任务：强制门控为中性/打开 (0.5)
+            # 我们不想强制为 0，因为 ScanQA 包含空间问题。
+            # 0.5 允许梯度根据 LM 损失向任一方向流动。
+            # gate_targets[is_qa] = 0.5 
+            # gate_mask[is_qa] = 0.0 # QA 监督的较低权重
+
+            gate_targets[is_qa] = 0.0
+            gate_mask[is_qa] = 1.0
+            
+            # 计算 MSE 损失
+            loss_gate = F.mse_loss(gate_values, gate_targets, reduction='none')
+            loss_gate = (loss_gate * gate_mask).sum() / (gate_mask.sum() + 1e-9)
+            
+            # total_loss += 0.5 * loss_gate # 加权添加到总损失
 
         # 总损失
         # total_loss = outputs.loss + 1.0 * loss_coord + 1.0 * loss_align
         # 降低辅助任务权重的初始值，避免掩盖主任务 Loss (QA performance drop)
-        total_loss = outputs.loss + 0.1 * loss_coord
+        total_loss = outputs.loss + 0.7 * loss_gate + 0.2 * loss_coord + 0 * loss_align
 
         return dict(
             loss=total_loss,
             loss_lm=outputs.loss,
+            loss_gate=loss_gate,
             loss_coord=loss_coord,
-            # loss_align=loss_align,
+            loss_align=loss_align,
             obj_norm=proj_object_embed.norm(dim=-1).mean().detach().cpu(),
             obj_img_norm=proj_object_img_embed.norm(dim=-1).mean().detach().cpu(),
             objid_norm=self.get_objid_embeds().norm(dim=-1).mean().detach().cpu(),
@@ -934,7 +1046,9 @@ class Chat3D(nn.Module):
         instr_embeds = sum_embeddings / sum_mask # [B, D]
 
         # 注入空间信息特征 
-        object_embed = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
+        object_embed, gate_values = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
+        # print(f"Instruction: {custom_prompt[0]}")
+        # print(f"Predicted Gate Value (Avg): {gate_values.mean().item():.4f}")
         object_embed = torch.nn.functional.normalize(object_embed, dim=-1)
 
         proj_object_embed = self.object_proj(object_embed)

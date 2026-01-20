@@ -142,7 +142,7 @@ class LlamaRotaryEmbedding(nn.Module):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        return cos.to(dtype=x.dtype)[:, -x.shape[2]:], sin.to(dtype=x.dtype)[:, -x.shape[2]:]
 
 
 class LlamaLinearScalingRotaryEmbedding(LlamaRotaryEmbedding):
@@ -203,9 +203,12 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     """
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
+    # q_embed = (q * cos) + (rotate_half(q) * sin)
+    # k_embed = (k * cos) + (rotate_half(k) * sin)
+    # return q_embed, k_embed
+    q_embed = (q.float() * cos.float()) + (rotate_half(q.float()) * sin.float())
+    k_embed = (k.float() * cos.float()) + (rotate_half(k.float()) * sin.float())
+    return q_embed.type_as(q), k_embed.type_as(k)
 
 
 class LlamaMLP(nn.Module):
@@ -1299,7 +1302,15 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             if past_key_values:
+                if input_ids.shape[1] > 0:
+                    position_ids = position_ids[:, -input_ids.shape[1] :]
+                else:
+                    position_ids = position_ids[:, :0]
+        elif position_ids is not None and past_key_values:
+            if input_ids.shape[1] > 0:
                 position_ids = position_ids[:, -input_ids.shape[1] :]
+            else:
+                position_ids = position_ids[:, :0]
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:

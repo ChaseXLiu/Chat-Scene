@@ -69,7 +69,7 @@ def train(
     metric_logger = MetricLogger(delimiter="  ")
     eval_metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", SmoothedValue(window=1, fmt="{value:.6f}"))
-    loss_names = ["loss", "loss_lm", "loss_coord", "obj_norm", "obj_img_norm", "objid_norm", "scene_norm"]
+    loss_names = ["loss", "loss_lm",  "loss_gate", "loss_coord", "loss_align", "obj_norm", "obj_img_norm", "objid_norm", "scene_norm"]
     media_types = get_media_types(train_loaders)
 
     # tot_param = sum(p.numel() for p in model_without_ddp.parameters())
@@ -91,7 +91,7 @@ def train(
             d.sampler.set_epoch(epoch)
     train_loader = MetaLoader(name2loader=dict(list(zip(media_types, train_loaders))))
 
-    accum_iter = 4
+    accum_iter = 2
     eval_freq = len(train_loader)
 
     optimizer.zero_grad()
@@ -104,6 +104,13 @@ def train(
         loss = loss_dict["loss"] / accum_iter
         
         scaler.scale(loss).backward()
+        
+        # # [DEBUG] Check gradients for SpatialRelationAttention at the very beginning
+        # if global_step == 0 and i == 0 and is_main_process():
+        #     logger.info("Checking gradients for SpatialRelationAttention...")
+        #     for name, p in model.named_parameters():
+        #         if "spatial_relation_attention" in name:
+        #             logger.info(f"{name} | Trainable: {p.requires_grad} | Grad: {p.grad is not None}")
 
         if ((i + 1) % accum_iter == 0) or (i + 1 == len(train_loader)):
             if config.optimizer.max_grad_norm > 0:
