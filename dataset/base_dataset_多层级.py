@@ -20,10 +20,13 @@ class BaseDataset(Dataset):
         self.img_feats = None
         self.scene_feats = None
         self.scene_img_feats = None
+        self.text_feats = None
+        self.scene_text_feats = None
         self.scene_masks = None
         self.feat_dim = 1024
         self.img_feat_dim = 1024
         self.max_obj_num = 100
+        self.text_feat_dim= 768
 
     def __getitem__(self, index):
         raise NotImplementedError
@@ -38,6 +41,7 @@ class BaseDataset(Dataset):
             scan_ids = set('_'.join(x.split('_')[:2]) for x in self.img_feats.keys())
         scene_feats = {}
         scene_img_feats = {}
+        scene_text_feats = {}
         scene_masks = {}
         unwanted_words = ["wall", "ceiling", "floor", "object", "item"]
         for scan_id in scan_ids:
@@ -50,6 +54,7 @@ class BaseDataset(Dataset):
             obj_labels = scene_attr['objects'] if 'objects' in scene_attr else [''] * obj_num
             scene_feat = []
             scene_img_feat = []
+            scene_text_feat = []
             scene_mask = []
             for _i, _id in enumerate(obj_ids):
                 item_id = '_'.join([scan_id, f'{_id:02}'])
@@ -89,11 +94,16 @@ class BaseDataset(Dataset):
                                 scene_feat.append(padded_feat)
                         else:
                             scene_feat.append(torch.zeros(self.feat_dim * 3))
+                    
                 if self.img_feats is None or item_id not in self.img_feats:
                     # scene_img_feat.append(torch.randn((self.img_feat_dim)))
                     scene_img_feat.append(torch.zeros(self.img_feat_dim))
                 else:
                     scene_img_feat.append(self.img_feats[item_id].float())
+                if self.text_feats is None or item_id not in self.text_feats:
+                    scene_text_feat.append(torch.zeros(self.text_feat_dim))
+                else:
+                    scene_text_feat.append(self.text_feats[item_id].float())
                 # if scene_feat[-1] is None or any(x in obj_labels[_id] for x in unwanted_words):
                 #     scene_mask.append(0)
                 # else:
@@ -104,8 +114,8 @@ class BaseDataset(Dataset):
             scene_feats[scan_id] = scene_feat
             scene_img_feats[scan_id] = scene_img_feat
             scene_masks[scan_id] = scene_mask
-            
-        return scene_feats, scene_img_feats, scene_masks
+            scene_text_feats[scan_id] = torch.stack(scene_text_feat, dim=0)
+        return scene_feats, scene_img_feats, scene_masks, scene_text_feats
 
     def get_anno(self, index):
         scene_id = self.anno[index]["scene_id"]
@@ -119,11 +129,12 @@ class BaseDataset(Dataset):
         if scene_feat.ndim == 1:
             scene_feat = scene_feat.unsqueeze(0)
         scene_img_feat = self.scene_img_feats[scene_id] if self.scene_img_feats is not None else torch.zeros((scene_feat.shape[0], self.img_feat_dim))
+        scene_text_feat = self.scene_text_feats[scene_id] if self.scene_text_feats is not None else torch.zeros((scene_feat.shape[0], self.text_feat_dim))
         scene_mask = self.scene_masks[scene_id] if self.scene_masks is not None else torch.ones(scene_feat.shape[0], dtype=torch.int)
         # assigned_ids = torch.randperm(self.max_obj_num)[:len(scene_locs)]
         # assigned_ids = torch.randperm(len(scene_locs))
         assigned_ids = torch.randperm(self.max_obj_num) # !!!
-        return scene_id, scene_feat, scene_img_feat, scene_mask, scene_locs, assigned_ids
+        return scene_id, scene_feat, scene_img_feat, scene_mask, scene_locs, assigned_ids, scene_text_feat
     
 
 def update_caption(caption, assigned_ids):

@@ -72,6 +72,7 @@ train_file_dict = {
         seg_train_attr_file,
         f"{anno_root}/scan2cap_{segmentor}_train{version}.json",
         seg_text_feat_file,
+        1.0
     ],
     'scan2cap_location': [
         seg_feat_file,
@@ -100,7 +101,7 @@ train_file_dict = {
         seg_train_attr_file,
         f"{anno_root}/scanqa_train.json",
         seg_text_feat_file,
-        2.0
+        3.0
     ],
     'sqa3d': [
         seg_feat_file,
@@ -108,6 +109,7 @@ train_file_dict = {
         seg_train_attr_file,
         f"{anno_root}/sqa3d_train.json",
         seg_text_feat_file,
+        2.0
     ],
     'multi3dref': [
         seg_feat_file,
@@ -115,6 +117,7 @@ train_file_dict = {
         seg_train_attr_file,
         f"{anno_root}/multi3dref_{segmentor}_train{version}.json",
         seg_text_feat_file,
+        1.0
     ],
     'multi3dref_location': [
         seg_feat_file,
@@ -246,7 +249,7 @@ val_file_dict = {
 }
 
 
-num_workers = 32
+num_workers = 16
 batch_size = 32
 
 
@@ -268,7 +271,7 @@ model = dict(
     add_scene_token=True,
     add_img_token=True,
     use_lora=True,
-    train_emb=False,
+    train_emb=True,
     train_img_proj=True,
     train_spatial_attn=True,
     no_obj=False,
@@ -322,7 +325,7 @@ optimizer = dict(
     max_grad_norm=5,  # requires a positive float, use -1 to disable
     # use a different lr for some modules, e.g., larger lr for new modules
     different_lr=dict(
-        enable=True,
+        enable=False,
         module_names=["spatial_relation_attention", "coord_head", "geo_layer_weights", "distill_proj", "fusion_gate", "object_proj", "object_img_proj"], 
         lr=[2e-5, 2e-5, 2e-5, 2e-5, 2e-5, 2e-5, 2e-5], 
         wd=[0.02, 0.02, 0, 0.02, 0.02, 0.02, 0.02]
@@ -354,7 +357,7 @@ save_latest = False
 do_save = True
 auto_resume = True
 pretrained_path = ""
-stage1_checkpoint_path = "/data/lcx/chat-scene/outputs/ours_mini20251230_115935_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_00_14684.pth"
+# stage1_checkpoint_path = "/data/lcx/chat-scene/outputs/ours_mini20251230_115935_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scanqa__scanrefer#scanqa__chatscene/ckpt_00_14684.pth"
 img_projector_path = ""
 
 debug=False

@@ -30,7 +30,7 @@ from .twin_transformer import TwinTransformer
 
 logger = logging.getLogger(__name__)
 
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)
 
 def nclamp(input, min, max):
     return input.clamp(min=min, max=max).detach() + input - input.detach()
@@ -86,6 +86,7 @@ class SpatialRelationAttention(nn.Module):
 
         # ---- 空间特征投影 (用于计算 l_i) ----
         self.w_p = nn.Linear(3 + feat_dim, pos_dim, bias=False)
+        nn.init.constant_(self.w_p.weight, 0.0)
         
         # 空间头数设置
         self.spatial_n_head = num_heads if spatial_multihead else 1
@@ -225,6 +226,11 @@ class Chat3D(nn.Module):
         self.fuse_with_id = config.model.fuse_with_id
         self.use_location_token = config.model.use_location_token
 
+        # [新增] 消融实验开关
+        self.use_spatial_attention = getattr(config.model, 'use_spatial_attention', False)
+        self.use_geometry_aux = getattr(config.model, 'use_geometry_aux', True)
+        self.use_semantic_distillation = getattr(config.model, 'use_semantic_distillation', False)
+
         # # 空间多层级特征分组配置
         # initial_weights = torch.tensor([0.5, 0.3, 0.2])  # 三层级权重
         # self.multi_scale_weights = nn.Parameter(initial_weights)
@@ -298,19 +304,19 @@ class Chat3D(nn.Module):
                 self.llama_model = get_peft_model(self.llama_model, lora_config)
                 self.llama_model.print_trainable_parameters()
                 # 冻结输出头 (LM Head)
-                self.llama_model.model.lm_head.weight.requires_grad = False
+                self.llama_model.model.lm_head.weight.requires_grad = True
                 self.llama_model.model.lm_head.weight.data = self.llama_model.model.lm_head.weight.data.float()
                 self.llama_model.print_trainable_parameters()
                 # 冻结词表嵌入 (Embedding)
-                self.llama_model.model.model.embed_tokens.weight.requires_grad = False
+                self.llama_model.model.model.embed_tokens.weight.requires_grad = True
                 self.llama_model.model.model.embed_tokens.weight.data = self.llama_model.model.model.embed_tokens.weight.data.float()
                 self.llama_model.print_trainable_parameters()
             else:
                 # 冻结输出头 (LM Head)
-                self.llama_model.lm_head.weight.requires_grad = False
+                self.llama_model.lm_head.weight.requires_grad = True
                 self.llama_model.lm_head.weight.data = self.llama_model.lm_head.weight.data.float()
                 # 冻结词表嵌入 (Embedding)
-                self.llama_model.model.embed_tokens.weight.requires_grad = False
+                self.llama_model.model.embed_tokens.weight.requires_grad = True
                 self.llama_model.model.embed_tokens.weight.data = self.llama_model.model.embed_tokens.weight.data.float()
             
             self.llama_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
@@ -350,7 +356,8 @@ class Chat3D(nn.Module):
         # Use a SINGLE Linear layer to limit its capacity. 
         # This forces the upstream `proj_object_embed` to learn semantic structure
         # because a simple linear layer cannot fix complex semantic misalignment.
-        self.distill_proj = nn.Linear(self.llama_dim, 768)
+        if self.use_semantic_distillation:
+            self.distill_proj = nn.Linear(self.llama_dim, 768)
 
         # tt_hidden_dim = getattr(config.model, "tt_hidden_dim", 768)
         # tt_layers = getattr(config.model, "tt_layers", 2)
@@ -381,24 +388,28 @@ class Chat3D(nn.Module):
 
         # [新增] 创新点 B: 几何辅助任务头 (Geometry-Aware Auxiliary Task Head)
         # 用于从 Object Token 隐状态预测坐标 (x, y, z)
-        self.coord_head = nn.Sequential(
-            nn.Linear(self.llama_dim, self.llama_dim // 2),
-            nn.ReLU(),
-            nn.Linear(self.llama_dim // 2, 6) # 同时预测物体的中心坐标以及长宽高
-        )
+        if self.use_geometry_aux:
+            self.coord_head = nn.Sequential(
+                nn.Linear(self.llama_dim, self.llama_dim // 2),
+                nn.ReLU(),
+                nn.Linear(self.llama_dim // 2, 6) # 同时预测物体的中心坐标以及长宽高
+            )
+            nn.init.constant_(self.coord_head[-1].weight, 0.0)
+            nn.init.constant_(self.coord_head[-1].bias, 0.0)
         
-        # [新增] 创新点 B: 垂直聚合的可学习权重 (Layer-Level Adaptive Pooling)
-        # 对应 Layer 18-24 (共7层)
-        self.geo_layer_weights = nn.Parameter(torch.ones(7))
+            # [新增] 创新点 B: 垂直聚合的可学习权重 (Layer-Level Adaptive Pooling)
+            # 对应 Layer 18-24 (共7层)
+            self.geo_layer_weights = nn.Parameter(torch.ones(7))
 
         # 初始化空间关系注意力模块
-        self.spatial_relation_attention = SpatialRelationAttention(
-            feat_dim=self.input_dim,
-            pos_dim=5,  # [sin(θ_h), cos(θ_h), sin(θ_v), cos(θ_v), d_ij]
-            num_heads=8,
-            spatial_multihead=True,
-            instr_dim=self.llama_dim
-        )
+        if self.use_spatial_attention:
+            self.spatial_relation_attention = SpatialRelationAttention(
+                feat_dim=self.input_dim,
+                pos_dim=5,  # [sin(θ_h), cos(θ_h), sin(θ_v), cos(θ_v), d_ij]
+                num_heads=8,
+                spatial_multihead=True,
+                instr_dim=self.llama_dim
+            )
   
         # self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.scene_dim, nhead=8, dim_feedforward=2048, dropout=0.05, norm_first=True, batch_first=True)
         # self.relation_module = nn.TransformerEncoder(self.encoder_layer, num_layers=config.model.encoder_num_layers)
@@ -563,33 +574,33 @@ class Chat3D(nn.Module):
     #     fused_feat = torch.nn.functional.normalize(fused_feat, dim=-1)
     #     return fused_feat, img_feat
 
-    # def encode_object_feat(self, feat, img_feat, locs):
-    #     feat = torch.nn.functional.normalize(feat, dim=-1)
-    #     img_feat = torch.nn.functional.normalize(img_feat, dim=-1)
-    #     return feat, img_feat
-
     def encode_object_feat(self, feat, img_feat, locs):
         feat = torch.nn.functional.normalize(feat, dim=-1)
         img_feat = torch.nn.functional.normalize(img_feat, dim=-1)
+        return feat, img_feat
+
+    # def encode_object_feat(self, feat, img_feat, locs):
+    #     feat = torch.nn.functional.normalize(feat, dim=-1)
+    #     img_feat = torch.nn.functional.normalize(img_feat, dim=-1)
         
-        # 1. 切分特征
-        chunks = torch.split(feat, 1024, dim=-1) # tuple of (B, N, 1024)
-        stack_feats = torch.stack(chunks, dim=2) # [B, N, 3, 1024]
+    #     # 1. 切分特征
+    #     chunks = torch.split(feat, 1024, dim=-1) # tuple of (B, N, 1024)
+    #     stack_feats = torch.stack(chunks, dim=2) # [B, N, 3, 1024]
         
-        # 2. 计算动态权重 (Dynamic Gating)
-        # 输入原始的大向量 feat [B, N, 3072]
-        weights = self.fusion_gate(feat) # [B, N, 3]
-        weights = F.softmax(weights, dim=-1) # 归一化权重
+    #     # 2. 计算动态权重 (Dynamic Gating)
+    #     # 输入原始的大向量 feat [B, N, 3072]
+    #     weights = self.fusion_gate(feat) # [B, N, 3]
+    #     weights = F.softmax(weights, dim=-1) # 归一化权重
         
-        # 3. 加权融合
-        # weights: [B, N, 3] -> [B, N, 3, 1] 以便广播
-        # stack_feats: [B, N, 3, 1024]
-        fused_feat = (stack_feats * weights.unsqueeze(-1)).sum(dim=2) # [B, N, 1024]
+    #     # 3. 加权融合
+    #     # weights: [B, N, 3] -> [B, N, 3, 1] 以便广播
+    #     # stack_feats: [B, N, 3, 1024]
+    #     fused_feat = (stack_feats * weights.unsqueeze(-1)).sum(dim=2) # [B, N, 1024]
         
-        # 4. 再次归一化 (Good practice for inputs to Transformer/LLM)
-        fused_feat = torch.nn.functional.normalize(fused_feat, dim=-1)
+    #     # 4. 再次归一化 (Good practice for inputs to Transformer/LLM)
+    #     fused_feat = torch.nn.functional.normalize(fused_feat, dim=-1)
         
-        return fused_feat, img_feat
+    #     return fused_feat, img_feat
 
     @staticmethod
     def get_dist_attention(pos, dist_exp=1):
@@ -765,7 +776,10 @@ class Chat3D(nn.Module):
         instr_embeds = sum_embeddings / sum_mask # [B, D]
 
         # 注入空间信息特征
-        object_embed, gate_values = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
+        if self.use_spatial_attention:
+            object_embed, gate_values = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
+        else:
+            gate_values = None
         object_embed = torch.nn.functional.normalize(object_embed, dim=-1)
 
         proj_object_embed = self.object_proj(object_embed)
@@ -867,54 +881,55 @@ class Chat3D(nn.Module):
         # ==========================================
         # [新增] 创新点 B: 计算几何辅助任务损失 (Coordinate Regression Loss)
         # ==========================================
-        selected_layers = torch.stack(outputs.hidden_states[18:25], dim=0) # [7, B, L, D]        
-        layer_weights = torch.softmax(self.geo_layer_weights, dim=0) # [7]
         loss_coord = torch.tensor(0.0, device=device)
-        total_valid_objs = 0
-        
-        if stride > 0:
-            all_batch_indices = []
-            all_seq_indices = []
-            all_target_coords = []            
-            offset = torch.arange(stride, device=device)            
-            for i in range(batch_size):
-                num_valid = scene_mask[i].sum().item()
-                if num_valid == 0: continue
-                obj_starts = torch.arange(num_valid, device=device) * stride + p_0_len
-                seq_idx = obj_starts.unsqueeze(1) + offset.unsqueeze(0)
-                valid_obj_mask = seq_idx[:, -1] < max_seq_len
-                if not valid_obj_mask.any(): continue
-                valid_seq_idx = seq_idx[valid_obj_mask]
-                all_seq_indices.append(valid_seq_idx)
-                all_batch_indices.append(torch.full((valid_seq_idx.shape[0],), i, device=device, dtype=torch.long))
-                all_target_coords.append(batch_target_coords[i][valid_obj_mask])
+        if self.use_geometry_aux:
+            selected_layers = torch.stack(outputs.hidden_states[18:25], dim=0) # [7, B, L, D]        
+            layer_weights = torch.softmax(self.geo_layer_weights, dim=0) # [7]
+            total_valid_objs = 0
             
-            if all_batch_indices:
-                flat_batch_idx = torch.cat(all_batch_indices) # [Total_Objs]
-                flat_seq_idx = torch.cat(all_seq_indices)     # [Total_Objs, stride]
-                flat_targets = torch.cat(all_target_coords)   # [Total_Objs, 6]
+            if stride > 0:
+                all_batch_indices = []
+                all_seq_indices = []
+                all_target_coords = []            
+                offset = torch.arange(stride, device=device)            
+                for i in range(batch_size):
+                    num_valid = scene_mask[i].sum().item()
+                    if num_valid == 0: continue
+                    obj_starts = torch.arange(num_valid, device=device) * stride + p_0_len
+                    seq_idx = obj_starts.unsqueeze(1) + offset.unsqueeze(0)
+                    valid_obj_mask = seq_idx[:, -1] < max_seq_len
+                    if not valid_obj_mask.any(): continue
+                    valid_seq_idx = seq_idx[valid_obj_mask]
+                    all_seq_indices.append(valid_seq_idx)
+                    all_batch_indices.append(torch.full((valid_seq_idx.shape[0],), i, device=device, dtype=torch.long))
+                    all_target_coords.append(batch_target_coords[i][valid_obj_mask])
                 
-                total_valid_objs = flat_targets.shape[0]
-                flat_batch_idx_expanded = flat_batch_idx.unsqueeze(1).expand(-1, stride)     
+                if all_batch_indices:
+                    flat_batch_idx = torch.cat(all_batch_indices) # [Total_Objs]
+                    flat_seq_idx = torch.cat(all_seq_indices)     # [Total_Objs, stride]
+                    flat_targets = torch.cat(all_target_coords)   # [Total_Objs, 6]
+                    
+                    total_valid_objs = flat_targets.shape[0]
+                    flat_batch_idx_expanded = flat_batch_idx.unsqueeze(1).expand(-1, stride)     
 
-                geo_features_list = []
-                for l in range(7):
-                    geo_features_list.append(selected_layers[l][flat_batch_idx_expanded, flat_seq_idx])
-                
-                feats_full = torch.stack(geo_features_list, dim=0)                
-                feats_mean = feats_full.mean(dim=2)                
-                h_geo = (feats_mean * layer_weights.view(-1, 1, 1)).sum(dim=0)                
-                pred_coords = self.coord_head(h_geo) # [Total_Objs, 6]
-                loss_coord = F.mse_loss(pred_coords, flat_targets, reduction='sum')
-                
-                if total_valid_objs > 0:
-                    loss_coord = loss_coord / total_valid_objs
+                    geo_features_list = []
+                    for l in range(7):
+                        geo_features_list.append(selected_layers[l][flat_batch_idx_expanded, flat_seq_idx])
+                    
+                    feats_full = torch.stack(geo_features_list, dim=0)                
+                    feats_mean = feats_full.mean(dim=2)                
+                    h_geo = (feats_mean * layer_weights.view(-1, 1, 1)).sum(dim=0)                
+                    pred_coords = self.coord_head(h_geo) # [Total_Objs, 6]
+                    loss_coord = F.mse_loss(pred_coords, flat_targets, reduction='sum')
+                    
+                    if total_valid_objs > 0:
+                        loss_coord = loss_coord / total_valid_objs
 
         # ==========================================
         # [新增] 创新点 C: 基于对齐的描述增强 (Alignment-based Description Enhancement)
         # ==========================================
         loss_align = torch.tensor(0.0, device=device)
-        if description_embeds is not None:
+        if self.use_semantic_distillation and description_embeds is not None:
             # description_embeds: [B, N, 768]
             # proj_object_embed: [B, N, 4096]
             # 确保 description_embeds 在正确的设备上
@@ -944,7 +959,7 @@ class Chat3D(nn.Module):
         # [新增] 门控监督损失 (Gate Supervision Loss)
         # ==========================================
         loss_gate = torch.tensor(0.0, device=device)
-        if task_types is not None:
+        if self.use_spatial_attention and task_types is not None:
             # task_types 应该是一个张量 [B]
             if isinstance(task_types, list):
                  task_types = torch.tensor(task_types, device=device)
@@ -984,7 +999,9 @@ class Chat3D(nn.Module):
         # 总损失
         # total_loss = outputs.loss + 1.0 * loss_coord + 1.0 * loss_align
         # 降低辅助任务权重的初始值，避免掩盖主任务 Loss (QA performance drop)
-        total_loss = outputs.loss + 0.7 * loss_gate + 0.2 * loss_coord + 0 * loss_align
+        # total_loss = outputs.loss + 0.7 * loss_gate + 0.2 * loss_coord + 0 * loss_align
+        # total_loss = outputs.loss + 0.7 * loss_gate + 0.2 * loss_coord + 0 * loss_align
+        total_loss = outputs.loss + 1.0 * loss_gate + 0.1 * loss_coord + 0 * loss_align
 
         return dict(
             loss=total_loss,
@@ -1046,7 +1063,10 @@ class Chat3D(nn.Module):
         instr_embeds = sum_embeddings / sum_mask # [B, D]
 
         # 注入空间信息特征 
-        object_embed, gate_values = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
+        if self.use_spatial_attention:
+            object_embed, gate_values = self.spatial_relation_attention(object_embed, scene_locs[:, :, :3], instr_embeds)
+        else:
+            gate_values = torch.zeros((batch_size, 1), device=device) # Dummy value
         # print(f"Instruction: {custom_prompt[0]}")
         # print(f"Predicted Gate Value (Avg): {gate_values.mean().item():.4f}")
         object_embed = torch.nn.functional.normalize(object_embed, dim=-1)
@@ -1096,7 +1116,7 @@ class Chat3D(nn.Module):
             output_text = output_text.replace('  ', ' ').replace(' .', '.').strip()
             output_text = recover_caption(output_text, assigned_ids[i].tolist())
             output_texts.append(output_text)
-        return output_texts
+        return output_texts, gate_values
 
     def forward(self, **kwargs):
         if "answers" in kwargs:

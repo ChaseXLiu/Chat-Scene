@@ -8,6 +8,9 @@
 # gpustat -ui
 # pkill -u lcx
 
+# setsid bash scripts/run.sh > output.log 2>&1 &
+# pkill -f "tasks/train.py"
+
 which_python=$(which python)
 export PYTHONPATH=${PYTHONPATH}:${which_python}:.
 echo "PYTHONPATH: ${PYTHONPATH}"
@@ -19,7 +22,7 @@ epoch=3
 batch_size=16
 lr=5e-6
 # lr=5e-7
-train_emb=False
+train_emb=True
 train_img_proj=True
 train_spatial_attn=True
 add_img_token=True
@@ -27,7 +30,7 @@ add_scene_token=False
 no_obj=False
 input_dim=1024 # 1024
 bidirection=False
-different_lr=True
+different_lr=False
 max_obj_num=100
 lora_r=16
 lora_alpha=16
@@ -45,11 +48,11 @@ llama_model_path="/data/ZXMIC/mic_lcx/HuggingFace-Download-Accelerator/hf_hub/mo
 # train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#multi3dref"
 # val_tag="scanrefer#multi3dref#scan2cap#scanqa"
 
-# train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref"
-# val_tag="scanrefer#scanqa#scan2cap#sqa3d#multi3dref"
+train_tag="scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref"
+val_tag="scanrefer#scanqa#scan2cap#sqa3d#multi3dref"
 
-train_tag="scanrefer#obj_align#nr3d_caption#scanqa"
-val_tag="scanrefer#scanqa"
+# train_tag="scanrefer#obj_align#nr3d_caption#scanqa"
+# val_tag="scanrefer#scanqa"
 
 
 
@@ -72,7 +75,7 @@ fi
 
 tag="${train_tag}__${val_tag}__${other_info}"
 
-# pretrained_path="/data/ZXMIC/mic_lcx/Chat-Scene/Chat-Scene/pretrained_models/our_ckpt_00_7649.pth"
+# pretrained_path="/data/ZXMIC/mic_lcx/Chat-Scene/Chat-Scene/outputs/20260121_174426_lr5e-6_ep3_scanrefer#obj_align#nr3d_caption#scan2cap#scanqa#sqa3d#multi3dref__scanrefer#scanqa#scan2cap#sqa3d#multi3dref__chatscene/ckpt_00_9273.pth"
 pretrained_path="/data/ZXMIC/mic_lcx/Chat-Scene/Chat-Scene/pretrained_models/ckpt_01_3446.pth"
 
 

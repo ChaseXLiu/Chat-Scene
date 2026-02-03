@@ -60,41 +60,9 @@ class BaseDataset(Dataset):
                 item_id = '_'.join([scan_id, f'{_id:02}'])
                 if self.feats is None or item_id not in self.feats:
                     # scene_feat.append(torch.randn((self.feat_dim)))
-                    scene_feat.append(torch.zeros(self.feat_dim * 3))
+                    scene_feat.append(torch.zeros(self.feat_dim))
                 else:
-                    # scene_feat.append(self.feats[item_id])
-                    # 获取字典中的特征并拼接
-                    feat_dict = self.feats[item_id]
-                    if isinstance(feat_dict, dict):
-                        # 提取三种特征
-                        global_feat = feat_dict.get('global_feature', torch.zeros(self.feat_dim))
-                        local_feat = feat_dict.get('local_features', torch.zeros(self.feat_dim))
-                        texture_feat = feat_dict.get('texture_features', torch.zeros(self.feat_dim))
-                        
-                        # 确保所有特征都是正确的形状
-                        if not isinstance(global_feat, torch.Tensor) or global_feat.shape != torch.Size([self.feat_dim]):
-                            global_feat = torch.zeros(self.feat_dim)
-                        if not isinstance(local_feat, torch.Tensor) or local_feat.shape != torch.Size([self.feat_dim]):
-                            local_feat = torch.zeros(self.feat_dim)
-                        if not isinstance(texture_feat, torch.Tensor) or texture_feat.shape != torch.Size([self.feat_dim]):
-                            texture_feat = torch.zeros(self.feat_dim)
-                        
-                        # 拼接特征
-                        combined_feat = torch.cat([global_feat, local_feat, texture_feat], dim=0)
-                        scene_feat.append(combined_feat)
-                    else:
-                        # 如果不是字典，是张量
-                        if isinstance(feat_dict, torch.Tensor):
-                            if feat_dict.shape[0] == self.feat_dim * 3:
-                                scene_feat.append(feat_dict)
-                            else:
-                                # 如果维度不匹配，填充到正确大小
-                                padded_feat = torch.zeros(self.feat_dim * 3)
-                                padded_feat[:min(feat_dict.shape[0], self.feat_dim * 3)] = feat_dict[:min(feat_dict.shape[0], self.feat_dim * 3)]
-                                scene_feat.append(padded_feat)
-                        else:
-                            scene_feat.append(torch.zeros(self.feat_dim * 3))
-                    
+                    scene_feat.append(self.feats[item_id])
                 if self.img_feats is None or item_id not in self.img_feats:
                     # scene_img_feat.append(torch.randn((self.img_feat_dim)))
                     scene_img_feat.append(torch.zeros(self.img_feat_dim))

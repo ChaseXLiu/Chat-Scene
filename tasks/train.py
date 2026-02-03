@@ -224,7 +224,7 @@ def evaluate(
             if type(batch[k]) == torch.Tensor:
                 batch[k] = batch[k].to(device)
         with torch.no_grad():
-            pred = model(**batch, is_eval=True)
+            pred, gate_values = model(**batch, is_eval=True)
         # if "target_captions" in batch:
         #     cosine_scores.append(pred["cosine_score"])
         #     l2_distances.append(pred["l2_dis"])
@@ -253,6 +253,8 @@ def evaluate(
                     "qid": qid,
                     "prompt": prompt,
                     "pred": tmp_pred,
+                    "gate_value_mean": gate_values[bi].mean().item(),
+                    "gate_values": gate_values[bi].tolist(),
                     "ref_captions": batch["ref_captions"][bi],
                     "type_info": type_info
                 })
